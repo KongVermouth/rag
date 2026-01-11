@@ -1,0 +1,161 @@
+version: "3.8"
+
+services:
+  mysql8:
+    image: mysql:8.0
+    container_name: rag-mysql8
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: "root"
+      MYSQL_DATABASE: "rag_system"
+      MYSQL_USER: "rag_admin"
+      MYSQL_PASSWORD: "rag_jin"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - rag-net
+
+  es:
+    image: elasticsearch:7.17.10
+    container_name: rag-es7
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      discovery.type: single-node
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+      xpack.security.enabled: "false"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    networks:
+      - rag-net
+
+  kibana:
+    image: kibana:7.17.10
+    container_name: rag-kibana
+    restart: unless-stopped
+    depends_on:
+      - es
+    volumes:
+      - kibana-logs:/usr/share/kibana/logs
+    environment:
+      - "I18N_LOCALE=zh-CN"
+      - "ELASTICSEARCH_HOSTS=http://es:9200"
+    ports:
+      - "5601:5601"
+    networks:
+      - rag-net  
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: rag-etcd
+    restart: unless-stopped
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - rag-net
+
+
+  minio:
+    image: minio/minio:RELEASE.2023-12-23T07-19-11Z
+    container_name: rag-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    networks:
+      - rag-net
+
+  milvus-standalone:
+    image: milvusdb/milvus:v2.4.10
+    container_name: rag-milvus
+    platform: linux/amd64 
+    restart: unless-stopped
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - etcd
+      - minio
+    networks:
+      - rag-net
+    command: ["milvus", "run", "standalone"]
+
+  # ==================== Attu - Milvus Web管理界面 ====================
+  attu:
+    image: zilliz/attu:v2.4.12
+    container_name: rag-attu
+    restart: unless-stopped
+    depends_on:
+      - milvus-standalone
+    ports:
+      - "8001:3000"
+    environment:
+      - MILVUS_URL=milvus-standalone:19530
+      - ATTU_LOG_LEVEL=info
+    networks:
+      - rag-net
+
+  # ==================== Redis服务 ====================
+  redis:
+    image: redis:7.2-alpine
+    container_name: rag-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - rag-net
+
+volumes:
+  mysql-data:
+  es-data:
+  kibana-logs:
+  etcd-data:
+  minio-data:
+  milvus-data:
+  redis-data:
+
+networks:
+  rag-net:
+    driver: bridge

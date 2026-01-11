@@ -1,0 +1,170 @@
+# ========== 基础忽略规则 ==========
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+._*
+
+# ========== Python (后端) ==========
+
+# Python 字节码
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+.conda/
+
+# pip / uv 依赖锁文件（不提交依赖锁定文件）
+uv.lock
+requirements.lock
+Pipfile.lock
+pyproject.lock
+
+# 类型缓存
+.mypy_cache/
+.pytest_cache/
+*.cover
+htmlcov/
+
+# 测试覆盖率
+.coverage
+coverage.xml
+
+# ========== Node.js (前端) ==========
+
+# 依赖目录
+node_modules/
+
+# 构建产物
+.next/
+out/
+build/
+dist/
+
+# 日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 锁文件（使用 package.json 锁定版本，不提交 lock 文件）
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# 环境变量（前端）
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Vercel
+.vercel
+
+# ========== 模型文件 ==========
+
+# 完整模型目录
+models/
+!models/.gitkeep
+
+# Hugging Face 缓存
+.cache/
+*.h5
+*.hdf5
+*.pt
+*.bin
+*.safetensors
+
+# 向量数据库存储
+data/faiss_index/
+data/chroma/
+data/milvus/
+
+# 上传的文档数据（可选，根据需求决定是否排除）
+# data/files/
+# data/cleaned_md/
+# data/cleaned_txt/
+# data/raw_data/
+
+# ========== 数据库 ==========
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3
+
+# 其他数据库文件
+*.mdb
+*.accdb
+
+# ========== 环境变量 ==========
+
+.env
+.env.*
+!.env.example
+
+# ========== IDE 和编辑器 ==========
+
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# JetBrains
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/usage.statistics.xml
+.idea/**/dictionaries
+.idea/**/flowsettings
+
+# ========== 临时文件 ==========
+
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# ========== 配置文件（敏感） ==========
+
+*.conf
+*.config.json
+credentials.json
+
+# ========== 文档（可选） ==========
+
+# API 文档（自动生成）
+openapi.json
+API_DOCUMENTATION.md
+
+# ========== Docker ==========
+
+.docker/
+
+# ========== 其他 ==========
+
+*.md.bak
+*.bak
+*.orig
+*.rej
+*.patch
+
+# FastAPI 缓存
+.ruff_cache/

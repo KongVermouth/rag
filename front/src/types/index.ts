@@ -1,0 +1,368 @@
+/**
+ * API 响应通用类型
+ */
+export interface ApiResponse<T> {
+  data: T;
+  message?: string;
+}
+
+export interface PaginatedResponse<T> {
+  total: number;
+  items: T[];
+}
+
+export interface MessageResponse {
+  message: string;
+}
+
+/**
+ * 用户相关类型
+ */
+export interface User {
+  id: number;
+  username: string;
+  email: string;
+  role: 'user' | 'admin';
+  status: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UserRegister {
+  username: string;
+  email: string;
+  password: string;
+  role?: 'user' | 'admin';
+}
+
+export interface UserLogin {
+  username: string;
+  password: string;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+}
+
+export interface UserUpdate {
+  email?: string;
+  role?: 'user' | 'admin';
+  status?: number;
+}
+
+export interface PasswordChange {
+  old_password: string;
+  new_password: string;
+}
+
+export interface UserListResponse extends PaginatedResponse<User> {}
+
+/**
+ * 知识库相关类型
+ */
+export interface Knowledge {
+  id: number;
+  name: string;
+  embed_llm_id: number;
+  chunk_size: number;
+  chunk_overlap: number;
+  description?: string;
+  status: number;
+  user_id: number;
+  vector_collection_name: string;
+  document_count: number;
+  total_chunks: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeCreate {
+  name: string;
+  embed_llm_id: number;
+  chunk_size?: number;
+  chunk_overlap?: number;
+  description?: string;
+}
+
+export interface KnowledgeUpdate {
+  name?: string;
+  description?: string;
+  status?: number;
+}
+
+export interface KnowledgeBrief {
+  id: number;
+  name: string;
+  document_count: number;
+}
+
+export interface KnowledgeListResponse extends PaginatedResponse<Knowledge> {}
+
+/**
+ * 文档相关类型
+ */
+export interface Document {
+  id: number;
+  knowledge_id: number;
+  file_name: string;
+  file_extension: string;
+  file_size: number;
+  file_path: string;
+  status: 'uploading' | 'parsing' | 'embedding' | 'completed' | 'failed';
+  chunk_count: number;
+  error_msg?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentUploadResponse {
+  document_id: number;
+  filename: string;
+  file_size: number;
+  task_id?: string;
+  message: string;
+}
+
+export interface DocumentStatus {
+  document_id: number;
+  file_name: string;
+  status: string;
+  chunk_count: number;
+  error_msg?: string;
+}
+
+export interface DocumentListResponse extends PaginatedResponse<Document> {}
+
+/**
+ * 机器人相关类型
+ */
+export interface Robot {
+  id: number;
+  name: string;
+  chat_llm_id: number;
+  system_prompt: string;
+  top_k: number;
+  temperature: number;
+  max_tokens: number;
+  description?: string;
+  status: number;
+  user_id: number;
+  knowledge_ids: number[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RobotCreate {
+  name: string;
+  chat_llm_id: number;
+  knowledge_ids: number[];
+  system_prompt?: string;
+  top_k?: number;
+  temperature?: number;
+  max_tokens?: number;
+  description?: string;
+}
+
+export interface RobotUpdate {
+  name?: string;
+  chat_llm_id?: number;
+  knowledge_ids?: number[];
+  system_prompt?: string;
+  top_k?: number;
+  temperature?: number;
+  max_tokens?: number;
+  description?: string;
+  status?: number;
+}
+
+export interface RobotBrief {
+  id: number;
+  name: string;
+  description?: string;
+}
+
+export interface RobotListResponse extends PaginatedResponse<Robot> {}
+
+/**
+ * LLM模型相关类型
+ */
+export interface LLM {
+  id: number;
+  name: string;
+  model_type: 'embedding' | 'chat';
+  provider: string;
+  model_name: string;
+  base_url?: string;
+  api_version?: string;
+  description?: string;
+  status: number;
+  user_id: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LLMCreate {
+  name: string;
+  model_type: 'embedding' | 'chat';
+  provider: string;
+  model_name: string;
+  base_url?: string;
+  api_version?: string;
+  description?: string;
+}
+
+export interface LLMUpdate {
+  name?: string;
+  base_url?: string;
+  api_version?: string;
+  description?: string;
+  status?: number;
+}
+
+export interface LLMBrief {
+  id: number;
+  name: string;
+  model_type: string;
+  provider: string;
+}
+
+export interface LLMListResponse extends PaginatedResponse<LLM> {}
+
+/**
+ * API密钥相关类型
+ */
+export interface APIKey {
+  id: number;
+  llm_id: number;
+  user_id: number;
+  alias: string;
+  api_key_masked: string;
+  description?: string;
+  status: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface APIKeyCreate {
+  llm_id: number;
+  alias: string;
+  api_key: string;
+  description?: string;
+}
+
+export interface APIKeyUpdate {
+  alias?: string;
+  api_key?: string;
+  description?: string;
+  status?: number;
+}
+
+export interface APIKeyOption {
+  id: number;
+  llm_id: number;
+  llm_name?: string;
+  alias: string;
+}
+
+export interface APIKeyListResponse extends PaginatedResponse<APIKey> {}
+
+export interface APIKeyOptionsResponse {
+  total: number;
+  items: APIKeyOption[];
+}
+
+/**
+ * 聊天相关类型
+ */
+export interface ChatRequest {
+  robot_id: number;
+  question: string;
+  session_id?: string;
+  stream?: boolean;
+}
+
+export interface RetrievedContext {
+  chunk_id: string;
+  document_id: number;
+  filename: string;
+  content: string;
+  score: number;
+  source: 'vector' | 'keyword' | 'hybrid';
+}
+
+export interface ChatResponse {
+  session_id: string;
+  question: string;
+  answer: string;
+  contexts: RetrievedContext[];
+  token_usage: Record<string, number>;
+  response_time: number;
+}
+
+export interface KnowledgeTestRequest {
+  knowledge_id: number;
+  query: string;
+  top_k?: number;
+  retrieval_mode?: 'vector' | 'keyword' | 'hybrid';
+}
+
+export interface KnowledgeTestResponse {
+  query: string;
+  retrieval_mode: string;
+  results: RetrievedContext[];
+  retrieval_time: number;
+}
+
+/**
+ * 会话相关类型
+ */
+export interface Session {
+  session_id: string;
+  robot_id: number;
+  title?: string;
+  summary?: string;
+  message_count: number;
+  status: 'active' | 'archived' | 'deleted';
+  is_pinned: boolean;
+  last_message_at?: string;
+  created_at: string;
+}
+
+export interface SessionCreate {
+  robot_id: number;
+  title?: string;
+}
+
+export interface SessionUpdate {
+  title?: string;
+  is_pinned?: boolean;
+  status?: 'active' | 'archived' | 'deleted';
+}
+
+export interface ChatHistoryItem {
+  message_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  contexts?: RetrievedContext[];
+  token_usage?: Record<string, number>;
+  feedback?: number;
+  created_at: string;
+}
+
+export interface SessionDetail {
+  session: Session;
+  messages: ChatHistoryItem[];
+}
+
+export interface SessionListResponse {
+  total: number;
+  sessions: Session[];
+}
+
+export interface FeedbackRequest {
+  message_id: string;
+  feedback: -1 | 0 | 1;
+  comment?: string;
+}

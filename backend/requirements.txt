@@ -1,0 +1,82 @@
+# ================================================
+# RAG 后端系统依赖配置
+# 版本已锁定为精确版本号以确保环境一致性
+# 推荐使用 uv 安装: uv pip install -r requirements.txt
+# ================================================
+
+# -------------------- Web框架 --------------------
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+python-multipart==0.0.9
+
+# -------------------- 数据库ORM和连接 --------------------
+sqlalchemy==2.0.27
+pymysql==1.1.0
+alembic==1.13.1
+
+# -------------------- 数据验证 --------------------
+# Pydantic v2 核心依赖
+pydantic==2.6.1
+pydantic-settings==2.2.1
+email-validator==2.1.0
+
+# -------------------- 认证和安全 --------------------
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.2
+cryptography==42.0.5
+
+# -------------------- Elasticsearch客户端 --------------------
+elasticsearch==7.17.9
+
+# -------------------- Milvus向量数据库客户端 --------------------
+# pymilvus 依赖 environs，而 environs 依赖 marshmallow
+# 修复说明：pymilvus 2.4.1 强制要求 environs<=9.5.0，因此将 environs 从 11.0.0 降级为 9.5.0
+pymilvus==2.4.1
+marshmallow==3.21.1
+environs==9.5.0
+
+# -------------------- 异步任务队列 --------------------
+celery==5.3.6
+redis==5.0.1
+
+# -------------------- 文档解析 --------------------
+PyMuPDF==1.23.26
+python-docx==1.1.0
+html2text==2024.2.26
+beautifulsoup4==4.12.3
+lxml==5.1.0
+
+# -------------------- 文本处理和切分 --------------------
+langchain==0.1.9
+langchain-text-splitters==0.0.1
+
+# -------------------- Embedding模型 --------------------
+transformers==4.57.3
+tokenizers==0.22.2
+# PyTorch GPU (CUDA 12.4) 版本安装说明：
+# 默认从 PyPI 安装的是 CPU 版本，如需 GPU 版本请使用以下命令：
+#
+# 方式1: 使用 uv (推荐，会自动读取 pyproject.toml 配置)
+#   uv pip install -e .
+#
+# 方式2: 使用 pip 指定索引源
+#   pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+#
+torch==2.4.0
+torchvision==0.19.0
+sentence-transformers==5.2.0
+
+# -------------------- 工具库 --------------------
+tqdm==4.66.2
+python-dotenv==1.0.1
+requests==2.31.0
+aiofiles==23.2.1
+
+# -------------------- 日志 --------------------
+loguru==0.7.2
+
+# -------------------- 开发工具 --------------------
+pytest==8.0.2
+pytest-asyncio==0.23.5
+httpx==0.27.0
