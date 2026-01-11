@@ -72,6 +72,7 @@ tqdm==4.66.2
 python-dotenv==1.0.1
 requests==2.31.0
 aiofiles==23.2.1
+modelscope==1.12.1
 
 # -------------------- 日志 --------------------
 loguru==0.7.2
