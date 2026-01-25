@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 import httpx
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Generator
 from sqlalchemy.orm import Session
 
 from app.models.robot import Robot
@@ -464,6 +464,175 @@ class RAGService:
                 "total_tokens": data.get("usage", {}).get("input_tokens", 0) + data.get("usage", {}).get("output_tokens", 0)
             }
         }
+
+    def _call_openai_compatible_stream(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int
+    ) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
+        """
+        流式调用OpenAI兼容的API
+
+        Yields:
+            Dict: 包含 content 和 reasoning_content（如有）的数据块
+
+        Returns:
+            Dict: 最终的 token_usage 统计
+        """
+        import json
+
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True
+        }
+
+        reasoning_content = ""
+        answer_content = ""
+        token_usage = {}
+
+        with httpx.Client(timeout=120.0) as client:
+            with client.stream("POST", url, json=payload, headers=headers) as response:
+                if response.status_code != 200:
+                    error_text = response.text[:500]
+                    raise ValueError(f"API请求失败({response.status_code}): {error_text}")
+
+                for line in response.iter_lines():
+                    if line:
+                        line = line.decode('utf-8')
+                        if line.startswith('data: '):
+                            data_str = line[6:]
+                            if data_str == '[DONE]':
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                chunk = data.get("choices", [{}])[0].get("delta", {})
+
+                                # 获取内容增量
+                                content_delta = chunk.get("content", "")
+                                if content_delta:
+                                    answer_content += content_delta
+                                    yield {
+                                        "content": content_delta,
+                                        "reasoning_content": None,
+                                        "is_finished": False
+                                    }
+
+                                # 获取思考过程（部分模型支持）
+                                if "reasoning_content" in chunk:
+                                    reasoning_delta = chunk.get("reasoning_content", "")
+                                    reasoning_content += reasoning_delta
+                                    yield {
+                                        "content": None,
+                                        "reasoning_content": reasoning_delta,
+                                        "is_finished": False
+                                    }
+
+                                # 检查是否完成
+                                finish_reason = chunk.get("finish_reason")
+                                if finish_reason:
+                                    # 获取完整的 token 使用统计
+                                    usage = data.get("usage", {})
+                                    token_usage = {
+                                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                                        "completion_tokens": usage.get("completion_tokens", 0),
+                                        "total_tokens": usage.get("total_tokens", 0)
+                                    }
+                            except json.JSONDecodeError:
+                                continue
+
+        # 发送完成信号和最终统计
+        yield {
+            "content": None,
+            "reasoning_content": None,
+            "is_finished": True,
+            "token_usage": token_usage,
+            "full_answer": answer_content,
+            "full_reasoning_content": reasoning_content
+        }
+
+    def generate_answer_stream(
+        self,
+        db: Session,
+        robot: Robot,
+        question: str,
+        contexts: List[RetrievedContext],
+        session_id: str = None,
+        history_messages: List[Dict[str, str]] = None
+    ) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
+        """
+        流式生成回答
+
+        Yields:
+            Dict: 流式数据块，包含 content、reasoning_content 等
+
+        Returns:
+            Dict: 包含完整回答和 token_usage 的字典
+        """
+        # 构建检索上下文文本
+        context_text = "\n\n".join([
+            f"[文档{i+1}] {ctx.filename}\n{ctx.content}"
+            for i, ctx in enumerate(contexts)
+        ]) if contexts else "未找到相关的知识库内容"
+
+        # 构建完整的消息列表
+        messages = []
+
+        # 系统提示词
+        system_prompt = robot.system_prompt or "你是一个智能助手，请基于提供的知识库内容回答用户问题。"
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
+
+        # 历史对话
+        if history_messages:
+            messages.extend(history_messages)
+
+        # 当前问题
+        user_content = f"""## 知识库上下文：
+{context_text}
+
+## 用户问题：
+{question}
+
+请基于以上知识库内容回答用户问题。如果知识库中没有相关信息，请说明这一点。"""
+        messages.append({
+            "role": "user",
+            "content": user_content
+        })
+
+        # 调用LLM流式生成
+        try:
+            return self._call_openai_compatible_stream(
+                base_url=robot.llm.base_url or "https://api.openai.com/v1" if robot.llm else "https://api.openai.com/v1",
+                api_key=robot.llm.api_key if robot.llm else "",
+                model=robot.llm.model_name if robot.llm else "",
+                messages=messages,
+                temperature=getattr(robot, 'temperature', 0.7),
+                max_tokens=getattr(robot, 'max_tokens', 2000)
+            )
+        except Exception as e:
+            logger.error(f"LLM流式调用失败: {e}")
+            yield {
+                "content": f"抱歉，生成回答时出错: {str(e)}",
+                "reasoning_content": None,
+                "is_finished": True,
+                "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "full_answer": f"抱歉，生成回答时出错: {str(e)}",
+                "full_reasoning_content": ""
+            }
 
     def generate_answer(
         self,

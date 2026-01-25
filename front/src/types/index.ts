@@ -349,6 +349,7 @@ export interface ChatHistoryItem {
   token_usage?: Record<string, number>;
   feedback?: number;
   created_at: string;
+  reasoning_content?: string;
 }
 
 export interface SessionDetail {
@@ -365,4 +366,145 @@ export interface FeedbackRequest {
   message_id: string;
   feedback: -1 | 0 | 1;
   comment?: string;
+}
+
+/**
+ * 流式响应类型 - 新的 event/data 格式
+ */
+
+// 基础事件类型
+export interface BaseStreamEvent {
+  type: string;
+}
+
+// 思考过程事件
+export interface ThinkEvent extends BaseStreamEvent {
+  type: 'think';
+  title: string;
+  iconType: number;
+  content: string;
+  status: 1 | 2; // 1: 进行中, 2: 已完成
+}
+
+// 文本事件
+export interface TextEvent extends BaseStreamEvent {
+  type: 'text';
+  msg: string;
+}
+
+// 搜索结果引用事件
+export interface SearchGuidEvent extends BaseStreamEvent {
+  type: 'searchGuid';
+  title: string;
+  subTitle?: string;
+  footnote?: string;
+  prompt?: string;
+  botPrompt?: string;
+  entranceIndex?: number;
+  messageId?: string;
+  sourceType?: string;
+  docs?: SearchDoc[];
+  citations?: null;
+  hitDeepMode?: boolean;
+  hitHelpDraw?: boolean;
+  hitDrawMore?: boolean;
+  hitSearchAIImg?: boolean;
+  topic?: string;
+  count?: number;
+  deepModeCid?: string;
+  aiImageTotal?: number;
+  realImageTotal?: number;
+  enableFeatures?: string[];
+}
+
+// 搜索文档
+export interface SearchDoc {
+  index: number;
+  docId: string;
+  title: string;
+  url: string;
+  sourceType: string;
+  quote: string;
+  publish_time: string;
+  icon_url: string;
+  web_site_name: string;
+  ref_source_weight: number;
+  webSiteSource: string;
+  invisibleExt?: Record<string, unknown>;
+  resource_type?: string;
+  sub_resource_type?: string;
+}
+
+// 上下文事件
+export interface ContextEvent extends BaseStreamEvent {
+  type: 'context';
+  index: number;
+  docId: string;
+  title: string;
+  url: string;
+  sourceType: string;
+  quote: string;
+  publish_time: string;
+  icon_url: string;
+  web_site_name: string;
+  ref_source_weight: number;
+  content: string;
+}
+
+// 完成事件
+export interface FinishedEvent extends BaseStreamEvent {
+  type: 'finished';
+  session_id: string;
+  token_usage?: Record<string, number>;
+  full_answer: string;
+  full_reasoning_content: string;
+}
+
+// speech_type 事件负载
+export type SpeechTypeEvent = { type: 'reasoner' } | { type: 'text' } | ThinkEvent | SearchGuidEvent | ContextEvent | FinishedEvent;
+
+// 原始 SSE 事件
+export interface SSEEvent {
+  event: string;
+  data: string;
+}
+
+// 聊天流式响应数据
+export interface ChatStreamChunk {
+  // 兼容旧格式
+  session_id?: string;
+  content?: string | null;
+  reasoning_content?: string | null;
+  is_finished?: boolean;
+  contexts?: RetrievedContext[];
+  token_usage?: Record<string, number>;
+  full_answer?: string;
+  full_reasoning_content?: string;
+  retrieval_time?: number;
+  error?: string;
+
+  // 新格式字段
+  type?: string;
+  msg?: string;
+  title?: string;
+  iconType?: number;
+  status?: number;
+  index?: number;
+  docs?: SearchDoc[];
+}
+
+/**
+ * 思考过程类型
+ */
+export interface ReasoningContent {
+  content: string;
+  is_folded: boolean;
+}
+
+/**
+ * 扩展的聊天消息项（支持思考过程）
+ */
+export interface ChatHistoryItemWithReasoning extends ChatHistoryItem {
+  reasoning_content?: string;
+  is_reasoning_folded?: boolean;
 }

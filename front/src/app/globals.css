@@ -98,9 +98,49 @@
 /* 打字机效果 */
 .typing-indicator::after {
   content: '|';
-  animation: blink 1s infinite;
 }
 
+/* 思考过程折叠动画 */
+.reasoning-fold {
+  transition: all 0.3s ease;
+  overflow: hidden;
+}
+
+.reasoning-fold.collapsed {
+  max-height: 0;
+  opacity: 0;
+}
+
+.reasoning-fold.expanded {
+  max-height: 500px;
+  opacity: 1;
+}
+
+/* 流式内容闪烁光标 */
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.2em;
+  background-color: currentColor;
+  animation: cursorBlink 1s step-end infinite;
+  vertical-align: middle;
+}
+
+@keyframes cursorBlink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 思考过程高亮 */
+.reasoning-content {
+  @apply bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-400 dark:border-yellow-600;
+}
+
+/* 思考过程闪烁动画 */
 @keyframes blink {
   0%, 50% {
     opacity: 1;
@@ -108,4 +148,270 @@
   51%, 100% {
     opacity: 0;
   }
+}
+
+/* 思考过程组件样式 */
+.thinking-process {
+  --thinking-border: #fde047;
+  --thinking-bg: #fefce8;
+  --thinking-text: #854d0e;
+  --thinking-icon: #ca8a04;
+}
+
+.dark .thinking-process {
+  --thinking-border: #854d0e;
+  --thinking-bg: #18181b;
+  --thinking-text: #fef08a;
+  --thinking-icon: #facc15;
+}
+
+/* details/summary 样式重置 */
+.thinking-process details > summary {
+  list-style: none;
+}
+
+.thinking-process details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-process details > summary::before {
+  content: '';
+}
+
+/* 思考过程内容淡入动画 */
+@keyframes thinkingFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.thinking-process details[open] > div:not(summary) {
+  animation: thinkingFadeIn 0.25s ease-out;
+}
+
+/* 思考过程悬浮效果 */
+.thinking-process:hover {
+  box-shadow: 0 4px 12px rgba(251, 191, 36, 0.15);
+}
+
+.dark .thinking-process:hover {
+  box-shadow: 0 4px 12px rgba(251, 191, 36, 0.1);
+}
+
+/* 思考过程步骤高亮（可选） */
+.prose-yellow {
+  color: var(--thinking-text);
+}
+
+.prose-yellow strong {
+  color: #a16207;
+}
+
+.dark .prose-yellow strong {
+  color: #facc15;
+}
+
+/* 隐藏聊天输入框滚动条 */
+.chat-input-no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.chat-input-no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ==================== 行内代码样式 ==================== */
+.prose-chat .inline-code,
+.prose-chat :global(code:not(pre > code)) {
+  @apply bg-gray-100 dark:bg-gray-800 text-primary-600 dark:text-primary-400 px-1.5 py-0.5 rounded text-sm;
+  font-family: 'Fira Code', 'Monaco', 'Consolas', monospace;
+}
+
+/* ==================== 代码块容器（保留备用） ==================== */
+
+/* ==================== 表格容器 ==================== */
+.table-wrapper {
+  @apply my-3 rounded-lg overflow-hidden;
+}
+
+.table-wrapper table {
+  @apply my-0;
+}
+
+/* ==================== Katex Latex 公式样式 ==================== */
+.katex-display {
+  @apply overflow-x-auto overflow-y-hidden py-2;
+}
+
+.katex {
+  @apply text-gray-800 dark:text-gray-200;
+  font-size: 1.1em;
+}
+
+.katex .base {
+  @apply leading-normal;
+}
+
+.katex-display > .katex {
+  @apply inline-block;
+}
+
+.katex-display > .katex > .katex-html {
+  @apply block;
+}
+
+.katex-display > .katex > .katex-html > .tag {
+  @apply mr-auto;
+}
+
+/* 行内公式 */
+.prose-chat :global(.katex-inline) {
+  @apply bg-gray-50 dark:bg-gray-800 px-1 py-0.5 rounded;
+}
+
+/* 公式编号 */
+.katex-display .eqn-num {
+  @apply text-gray-500 dark:text-gray-400 text-sm;
+}
+
+/* Katex 错误样式 */
+.prose-chat :global(.katex-error) {
+  @apply text-red-500 bg-red-50 dark:bg-red-900/20 px-2 py-1 rounded;
+}
+
+/* ==================== 表格样式增强 ==================== */
+.prose-chat table {
+  @apply w-full border-collapse my-3 text-sm;
+}
+
+.prose-chat thead {
+  @apply bg-gray-100 dark:bg-gray-800;
+}
+
+.prose-chat th {
+  @apply border border-gray-300 dark:border-gray-600 px-3 py-2 text-left font-semibold text-gray-700 dark:text-gray-200;
+}
+
+.prose-chat tbody tr {
+  @apply border-b border-gray-200 dark:border-gray-700;
+}
+
+.prose-chat tbody tr:last-child {
+  @apply border-b-0;
+}
+
+.prose-chat td {
+  @apply border border-gray-300 dark:border-gray-600 px-3 py-2 text-gray-700 dark:text-gray-300;
+}
+
+.prose-chat tbody tr:hover {
+  @apply bg-gray-50 dark:bg-gray-800/50;
+}
+
+/* ==================== 代码高亮样式 ==================== */
+.prose-chat pre {
+  @apply relative;
+}
+
+.prose-chat pre code {
+  @apply block overflow-x-auto p-4 rounded-lg text-sm leading-relaxed;
+  font-family: 'Fira Code', 'Monaco', 'Consolas', monospace;
+}
+
+/* 代码语言标签 */
+.prose-chat pre[data-language]::before {
+  content: attr(data-language);
+  @apply absolute top-0 right-0 bg-primary-600 text-white text-xs px-2 py-1 rounded-bl-lg uppercase;
+}
+
+/* 语法高亮颜色 - 基于 Prism Tomorrow Night */
+.prose-chat code[class*="language-"],
+.prose-chat pre[class*="language-"] {
+  @apply bg-gray-900 dark:bg-gray-950 text-gray-100;
+}
+
+/* 行内代码样式调整 - 不使用 prismjs 主题 */
+.prose-chat :global(code:not(pre > code)) {
+  @apply bg-gray-100 dark:bg-gray-800 text-primary-600 dark:text-primary-400 px-1.5 py-0.5 rounded;
+  font-family: 'Fira Code', 'Monaco', 'Consolas', monospace;
+}
+
+/* 语法高亮颜色 */
+.prose-chat .token.comment,
+.prose-chat .token.prolog,
+.prose-chat .token.doctype,
+.prose-chat .token.cdata {
+  @apply text-gray-500 dark:text-gray-400;
+  font-style: italic;
+}
+
+.prose-chat .token.punctuation {
+  @apply text-gray-400 dark:text-gray-500;
+}
+
+.prose-chat .token.namespace {
+  @apply opacity-70;
+}
+
+.prose-chat .token.property,
+.prose-chat .token.tag,
+.prose-chat .token.boolean,
+.prose-chat .token.number,
+.prose-chat .token.constant,
+.prose-chat .token.symbol,
+.prose-chat .token.deleted {
+  @apply text-purple-400;
+}
+
+.prose-chat .token.selector,
+.prose-chat .token.attr-name,
+.prose-chat .token.string,
+.prose-chat .token.char,
+.prose-chat .token.builtin,
+.prose-chat .token.inserted {
+  @apply text-green-400;
+}
+
+.prose-chat .token.operator,
+.prose-chat .token.entity,
+.prose-chat .token.url,
+.prose-chat .language-css .token.string,
+.prose-chat .style .token.string {
+  @apply text-yellow-400;
+}
+
+.prose-chat .token.atrule,
+.prose-chat .token.attr-value,
+.prose-chat .token.keyword {
+  @apply text-pink-400;
+}
+
+.prose-chat .token.function,
+.prose-chat .token.class-name {
+  @apply text-blue-400;
+}
+
+.prose-chat .token.regex,
+.prose-chat .token.important,
+.prose-chat .token.variable {
+  @apply text-orange-400;
+}
+
+.prose-chat .token.important,
+.prose-chat .token.bold {
+  font-weight: 700;
+}
+
+.prose-chat .token.italic-text {
+  font-style: italic;
+}
+
+.prose-chat .token.entity {
+  @apply cursor-help;
 }

@@ -2,21 +2,28 @@
 对话问答API路由
 """
 import time
+import json
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.schemas.chat import (
     ChatRequest, ChatResponse, KnowledgeTestRequest, KnowledgeTestResponse,
     SessionCreate, SessionUpdate, SessionInfo, SessionListResponse,
-    SessionDetailResponse, FeedbackRequest
+    SessionDetailResponse, FeedbackRequest, RetrievedContext
 )
 from app.services.robot_service import robot_service
 from app.services.rag_service import rag_service
 from app.services.session_service import session_service
 from app.core.deps import get_current_user
 from app.models.user import User
+from app.services.context_manager import context_manager
+from app.utils.redis_client import redis_client
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -100,6 +107,310 @@ def chat(
     )
     
     return response
+
+
+@router.post("/ask/stream", summary="流式对话问答")
+def chat_stream(
+    chat_request: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    与机器人对话（流式输出）
+
+    - **robot_id**: 机器人ID
+    - **question**: 用户问题
+    - **session_id**: 会话ID（可选，不传则创建新会话）
+
+    使用SSE (Server-Sent Events) 流式返回生成的内容，支持思考过程折叠。
+    流式格式遵循 event/data 格式：
+    - event: speech_type, data: text → 普通文本回复
+    - event: speech_type, data: reasoner → 思考过程
+    - event: speech_type, data: search_with_text → 搜索结果
+    """
+    # 1. 获取或创建会话
+    session, is_new = session_service.get_or_create_session(
+        db=db,
+        user=current_user,
+        robot_id=chat_request.robot_id,
+        session_id=chat_request.session_id
+    )
+
+    # 2. 获取机器人配置
+    robot = robot_service.get_robot_by_id(db, chat_request.robot_id, current_user)
+
+    # 3. 获取关联的知识库
+    knowledge_ids = robot_service.get_robot_knowledge_ids(db, chat_request.robot_id)
+
+    if not knowledge_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="机器人未关联任何知识库"
+        )
+
+    # 4. 执行混合检索
+    retrieval_start = time.time()
+    contexts = rag_service.hybrid_retrieve(
+        db=db,
+        robot=robot,
+        knowledge_ids=knowledge_ids,
+        query=chat_request.question,
+        top_k=robot.top_k
+    )
+    retrieval_time = time.time() - retrieval_start
+
+    # 5. 获取历史消息
+    from app.utils.redis_client import redis_client
+    history_messages = redis_client.get_context_messages(session.session_id)
+    llm_history = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in history_messages
+    ]
+
+    # 6. 保存用户消息到数据库
+    session_service.save_chat_message(
+        db=db,
+        session_id=session.session_id,
+        role="user",
+        content=chat_request.question
+    )
+
+    # 7. 获取LLM配置用于流式调用
+    from app.models.llm import LLM
+    from app.models.apikey import APIKey
+    from app.core.security import api_key_crypto
+
+    llm = db.query(LLM).filter(LLM.id == robot.chat_llm_id, LLM.status == 1).first()
+    if not llm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="LLM模型不存在或已禁用"
+        )
+
+    apikey = db.query(APIKey).filter(
+        APIKey.llm_id == robot.chat_llm_id,
+        APIKey.status == 1
+    ).first()
+    if not apikey:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"LLM {llm.name} 没有可用的API Key"
+        )
+
+    api_key = api_key_crypto.decrypt(apikey.api_key_encrypted)
+
+    # 8. 构建消息
+    context_text = "\n\n".join([
+        f"[文档{i+1}] {ctx.filename}\n{ctx.content}"
+        for i, ctx in enumerate(contexts)
+    ]) if contexts else "未找到相关的知识库内容"
+
+    messages = []
+    system_prompt = robot.system_prompt or "你是一个智能助手，请基于提供的知识库内容回答用户问题。"
+    messages.append({"role": "system", "content": system_prompt})
+    if llm_history:
+        messages.extend(llm_history)
+
+    user_content = f"""## 知识库上下文：
+{context_text}
+
+## 用户问题：
+{chat_request.question}
+
+请基于以上知识库内容回答用户问题。如果知识库中没有相关信息，请说明这一点。"""
+    messages.append({"role": "user", "content": user_content})
+
+    # 9. 流式调用LLM
+    import httpx
+    import json as json_util
+
+    base_url = llm.base_url or "https://api.openai.com/v1"
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": llm.model_name,
+        "messages": messages,
+        "temperature": getattr(robot, 'temperature', 0.7),
+        "max_tokens": getattr(robot, 'max_tokens', 2000),
+        "stream": True
+    }
+
+    full_answer = ""
+    full_reasoning_content = ""
+    has_reasoning_started = False
+    has_text_started = False
+
+    # 预先获取 session_id，避免流式响应时 session 已过期
+    current_session_id = session.session_id
+    # 序列化 contexts 避免在生成器中访问 ORM 对象
+    contexts_data = [ctx.model_dump() for ctx in contexts]
+
+    def generate_stream():
+        nonlocal full_answer, full_reasoning_content, has_reasoning_started, has_text_started
+
+        def format_sse_event(event: str, data: dict) -> str:
+            """格式化SSE事件，添加 event: 和 data: 前缀"""
+            return f"event: {event}\ndata: {json_util.dumps(data)}\n\n"
+
+        # 先发送搜索结果引用
+        if contexts_data:
+            yield format_sse_event("speech_type", {"type": "searchGuid", "title": f"引用 {len(contexts_data)} 篇资料作为参考"})
+            # 发送每个引用文档
+            for ctx in contexts_data:
+                yield format_sse_event("speech_type", {
+                    "type": "context",
+                    "index": contexts_data.index(ctx) + 1,
+                    "docId": ctx.get("chunk_id", ""),
+                    "title": ctx.get("filename", "unknown"),
+                    "url": "",
+                    "sourceType": "knowledge_base",
+                    "quote": ctx.get("content", "")[:500],
+                    "publish_time": "",
+                    "icon_url": "",
+                    "web_site_name": "知识库",
+                    "ref_source_weight": int(ctx.get("score", 0) * 5),
+                    "content": ctx.get("content", "")
+                })
+
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                with client.stream("POST", url, json=payload, headers=headers) as response:
+                    if response.status_code != 200:
+                        yield format_sse_event("speech_type", {
+                            "type": "text",
+                            "msg": f"API请求失败({response.status_code})"
+                        })
+                        return
+
+                    for line in response.iter_lines():
+                        if line:
+                            # 兼容 str 和 bytes 类型
+                            line_decoded = line.decode('utf-8') if isinstance(line, bytes) else line
+                            if line_decoded.startswith('data: '):
+                                data_str = line_decoded[6:]
+                                if data_str == '[DONE]':
+                                    break
+                                try:
+                                    data = json_util.loads(data_str)
+                                    chunk = data.get("choices", [{}])[0].get("delta", {})
+
+                                    # 获取思考内容（reasoning_content）
+                                    if "reasoning_content" in chunk:
+                                        reasoning_delta = chunk.get("reasoning_content", "")
+                                        if reasoning_delta:
+                                            full_reasoning_content += reasoning_delta
+                                            has_reasoning_started = True
+                                            if not has_text_started:  # 如果还没有开始输出文本，发送 reasoner 事件
+                                                yield format_sse_event("speech_type", {"type": "reasoner"})
+                                                has_text_started = True
+                                            yield format_sse_event("speech_type", {
+                                                "type": "think",
+                                                "title": "思考中...",
+                                                "iconType": 9,
+                                                "content": reasoning_delta,
+                                                "status": 1
+                                            })
+
+                                    # 获取内容增量
+                                    content_delta = chunk.get("content", "")
+                                    if content_delta:
+                                        full_answer += content_delta
+                                        # 如果思考内容已经开始，需要先发送 reasoner 事件
+                                        if full_reasoning_content and not has_text_started:
+                                            yield format_sse_event("speech_type", {"type": "reasoner"})
+                                            has_text_started = True
+                                        elif not has_text_started and not full_reasoning_content:
+                                            # 没有思考内容，直接发送文本
+                                            yield format_sse_event("speech_type", {"type": "text"})
+                                            has_text_started = True
+                                        yield format_sse_event("speech_type", {
+                                            "type": "text",
+                                            "msg": content_delta
+                                        })
+
+                                    # 检查是否完成
+                                    if chunk.get("finish_reason"):
+                                        usage = data.get("usage", {})
+                                        token_usage = {
+                                            "prompt_tokens": usage.get("prompt_tokens", 0),
+                                            "completion_tokens": usage.get("completion_tokens", 0),
+                                            "total_tokens": usage.get("total_tokens", 0)
+                                        }
+
+                                        # 发送思考完成事件
+                                        if full_reasoning_content:
+                                            think_time = int(time.time() - retrieval_start)
+                                            yield format_sse_event("speech_type", {
+                                                "type": "think",
+                                                "title": f"已深度思考(用时{think_time}秒)",
+                                                "iconType": 7,
+                                                "content": "",
+                                                "status": 2
+                                            })
+
+                                        # 发送完成信号
+                                        yield format_sse_event("speech_type", {
+                                            "type": "finished",
+                                            "session_id": current_session_id,
+                                            "token_usage": token_usage,
+                                            "full_answer": full_answer,
+                                            "full_reasoning_content": full_reasoning_content
+                                        })
+                                except json_util.JSONDecodeError:
+                                    continue
+        except Exception as e:
+            yield format_sse_event("speech_type", {
+                "type": "text",
+                "msg": f"错误: {str(e)}"
+            })
+
+    def finally_save():
+        """流结束后保存助手消息"""
+        try:
+            response_time = time.time()
+            session_service.save_chat_message(
+                db=db,
+                session_id=current_session_id,
+                role="assistant",
+                content=full_answer,
+                contexts=contexts_data,
+                token_usage={},
+                time_metrics={"retrieval_time": retrieval_time}
+            )
+
+            # 只更新Redis上下文的助手消息，用户消息已在流开始时保存
+            context_manager.add_assistant_message(
+                session_id=current_session_id,
+                content=full_answer,
+                tokens=0
+            )
+
+            redis_client.update_active_session(current_user.id, current_session_id)
+        except Exception as e:
+            logger.error(f"保存流式对话历史失败: {e}")
+
+    def generate_stream_with_save():
+        """生成器：流式返回数据并在结束后保存"""
+        try:
+            # 使用生成器迭代，在结束后调用 finally_save
+            yield from generate_stream()
+        finally:
+            # 流结束后保存消息
+            finally_save()
+
+    # 返回流式响应
+    return StreamingResponse(
+        generate_stream_with_save(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 @router.post("/test", response_model=KnowledgeTestResponse, summary="测试知识库检索")

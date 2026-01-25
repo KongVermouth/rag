@@ -56,6 +56,7 @@ class ChatStreamChunk(BaseModel):
     session_id: str = Field(..., description="会话ID")
     content: str = Field(..., description="增量内容")
     is_finished: bool = Field(default=False, description="是否完成")
+    reasoning_content: Optional[str] = Field(None, description="思考过程内容（部分模型如DeepSeek R1/OpenAI o1支持）")
     contexts: Optional[List[RetrievedContext]] = Field(None, description="检索上下文（仅在首个chunk返回）")
     token_usage: Optional[dict] = Field(None, description="Token使用统计（仅在最后chunk返回）")
 
