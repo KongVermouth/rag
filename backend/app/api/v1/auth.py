@@ -2,7 +2,7 @@
 认证相关API路由
 """
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.schemas.user import UserRegister, UserLogin, TokenResponse, UserDetail
@@ -14,9 +14,9 @@ router = APIRouter()
 
 
 @router.post("/register", response_model=UserDetail, summary="用户注册")
-def register(
+async def register(
     user_data: UserRegister,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     用户注册接口
@@ -26,14 +26,14 @@ def register(
     - **password**: 密码，至少6个字符
     - **role**: 用户角色，可选值为 "user"（普通用户）或 "admin"（管理员），默认为 "user"
     """
-    user = auth_service.register(db, user_data)
+    user = await auth_service.register(db, user_data)
     return UserDetail.model_validate(user)
 
 
 @router.post("/login", response_model=TokenResponse, summary="用户登录")
-def login(
+async def login(
     login_data: UserLogin,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     用户登录接口
@@ -43,11 +43,11 @@ def login(
     
     返回访问令牌（JWT）
     """
-    return auth_service.login(db, login_data)
+    return await auth_service.login(db, login_data)
 
 
 @router.get("/me", response_model=UserDetail, summary="获取当前用户信息")
-def get_current_user_info(
+async def get_current_user_info(
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -59,9 +59,9 @@ def get_current_user_info(
 
 
 @router.post("/refresh", response_model=TokenResponse, summary="刷新Token")
-def refresh_token(
+async def refresh_token(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     刷新访问令牌

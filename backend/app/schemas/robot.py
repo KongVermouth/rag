@@ -3,21 +3,25 @@
 """
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 
 # ==================== 机器人创建 ====================
 class RobotCreate(BaseModel):
     """创建机器人请求"""
     name: str = Field(..., min_length=1, max_length=100, description="机器人名称")
+    avatar: Optional[str] = Field(None, description="机器人头像URL")
     chat_llm_id: int = Field(..., description="对话LLM模型ID")
+    rerank_llm_id: Optional[int] = Field(None, description="重排序LLM模型ID")
     knowledge_ids: List[int] = Field(..., min_length=1, description="关联的知识库ID列表")
     system_prompt: str = Field(
         default="你是一个智能助手，请基于提供的知识库内容回答用户问题。",
         max_length=2000,
         description="系统提示词"
     )
+    welcome_message: Optional[str] = Field(None, max_length=500, description="欢迎语")
     top_k: int = Field(default=5, ge=1, le=20, description="检索Top-K，1-20")
+    enable_rerank: bool = Field(default=False, description="是否启用重排序")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="生成温度，0.0-2.0")
     max_tokens: int = Field(default=2000, ge=100, le=8000, description="最大生成Token数，100-8000")
     description: Optional[str] = Field(None, max_length=500, description="机器人描述")
@@ -27,9 +31,13 @@ class RobotCreate(BaseModel):
 class RobotBase(BaseModel):
     """机器人基础信息"""
     name: str = Field(..., description="机器人名称")
+    avatar: Optional[str] = Field(None, description="机器人头像URL")
     chat_llm_id: int = Field(..., description="对话LLM模型ID")
+    rerank_llm_id: Optional[int] = Field(None, description="重排序LLM模型ID")
     system_prompt: str = Field(..., description="系统提示词")
+    welcome_message: Optional[str] = Field(None, description="欢迎语")
     top_k: int = Field(..., description="检索Top-K")
+    enable_rerank: bool = Field(..., description="是否启用重排序")
     temperature: float = Field(..., description="生成温度")
     max_tokens: int = Field(..., description="最大生成Token数")
     description: Optional[str] = Field(None, description="机器人描述")
@@ -46,14 +54,49 @@ class RobotDetail(RobotBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @model_validator(mode='before')
+    @classmethod
+    def map_welcome_msg(cls, data: any):
+        if hasattr(data, 'welcome_msg') and not hasattr(data, 'welcome_message'):
+            data.welcome_message = data.welcome_msg
+        elif isinstance(data, dict) and 'welcome_msg' in data and 'welcome_message' not in data:
+            data['welcome_message'] = data['welcome_msg']
+        return data
+
+
+# ==================== 机器人召回测试 ====================
+class RetrievalTestRequest(BaseModel):
+    """召回测试请求"""
+    query: str = Field(..., min_length=1, max_length=500, description="查询文本")
+    top_k: int = Field(default=5, ge=1, le=20, description="检索数量")
+    threshold: float = Field(default=0.0, ge=0.0, le=1.0, description="分数阈值")
+
+
+class RetrievalTestResultItem(BaseModel):
+    """召回测试结果项"""
+    id: str = Field(..., description="切片ID")
+    score: float = Field(..., description="得分")
+    content: str = Field(..., description="内容片段")
+    document_id: int = Field(..., description="所属文档ID")
+    filename: str = Field(..., description="所属文件名")
+
+
+class RetrievalTestResponse(BaseModel):
+    """召回测试响应"""
+    results: List[RetrievalTestResultItem] = Field(..., description="检索结果列表")
+
 
 class RobotUpdate(BaseModel):
     """机器人更新请求"""
     name: Optional[str] = Field(None, min_length=1, max_length=100, description="机器人名称")
+    avatar: Optional[str] = Field(None, description="机器人头像URL")
     chat_llm_id: Optional[int] = Field(None, description="对话LLM模型ID")
+    rerank_llm_id: Optional[int] = Field(None, description="重排序LLM模型ID")
     knowledge_ids: Optional[List[int]] = Field(None, min_length=1, description="关联的知识库ID列表")
     system_prompt: Optional[str] = Field(None, max_length=2000, description="系统提示词")
+    welcome_message: Optional[str] = Field(None, max_length=500, description="欢迎语")
     top_k: Optional[int] = Field(None, ge=1, le=20, description="检索Top-K")
+    enable_rerank: Optional[bool] = Field(None, description="是否启用重排序")
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="生成温度")
     max_tokens: Optional[int] = Field(None, ge=100, le=8000, description="最大生成Token数")
     description: Optional[str] = Field(None, max_length=500, description="机器人描述")

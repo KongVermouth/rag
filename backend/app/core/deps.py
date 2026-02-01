@@ -4,38 +4,49 @@
 """
 from typing import Optional
 from datetime import datetime, timezone
-from fastapi import Depends, HTTPException, status, Header
+from fastapi import Depends, HTTPException, status, Header, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 from app.db.session import get_db
 from app.core.security import decode_access_token
 from app.models.user import User
 
 
 # HTTP Bearer认证方案
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    x_token: Optional[str] = Header(None, alias="X-Token"),
+    token: Optional[str] = Query(None, description="认证令牌"),
+    db: AsyncSession = Depends(get_db)
 ) -> User:
     """
     获取当前登录用户
-    
-    Args:
-        credentials: HTTP Bearer认证凭证
-        db: 数据库会话
-    
-    Returns:
-        当前用户对象
-    
-    Raises:
-        HTTPException: 401 未认证或用户不存在
+    支持多种方式获取令牌:
+    1. Authorization: Bearer <token>
+    2. X-Token: <token> (Header)
+    3. token: <token> (Query Parameter)
     """
+    auth_token = None
+    if credentials:
+        auth_token = credentials.credentials
+    elif x_token:
+        auth_token = x_token
+    elif token:
+        auth_token = token
+    
+    if auth_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="未认证，请先登录",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
     # 解码JWT令牌
-    token = credentials.credentials
-    payload = decode_access_token(token)
+    payload = decode_access_token(auth_token)
     
     if payload is None:
         raise HTTPException(
@@ -57,7 +68,9 @@ async def get_current_user(
     token_iat = payload.get("iat")
     
     # 查询用户
-    user = db.query(User).filter(User.id == int(user_id)).first()
+    result = await db.execute(select(User).filter(User.id == int(user_id)))
+    user = result.scalars().first()
+    
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

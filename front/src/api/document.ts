@@ -58,4 +58,10 @@ export const documentApi = {
     const response = await apiClient.delete<MessageResponse>(`/documents/${id}`);
     return response.data;
   },
+
+  // 重试文档处理
+  retry: async (id: number): Promise<{ code: number; message: string; data: any }> => {
+    const response = await apiClient.post<{ code: number; message: string; data: any }>(`/documents/${id}/retry`);
+    return response.data;
+  },
 };

@@ -20,7 +20,7 @@ class LLM(Base):
     base_url = Column(String(255), nullable=True, comment="API Endpoint (非标准地址)")
     api_version = Column(String(50), nullable=True, comment="API版本")
     max_tokens = Column(Integer, default=4096, comment="最大上下文Token数")
-    description = Column(String(255), nullable=True, comment="模型描述")
+    description = Column(String(1000), nullable=True, comment="模型描述")
     status = Column(Integer, default=1, comment="状态：0-禁用，1-启用")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")

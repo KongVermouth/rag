@@ -244,7 +244,24 @@
   @apply my-0;
 }
 
-/* ==================== Katex Latex 公式样式 ==================== */
+/* ==================== Docx Preview 样式 ==================== */
+.docx-preview-container {
+  @apply bg-white dark:bg-gray-800 p-8 shadow-sm rounded-lg mx-auto max-w-4xl;
+}
+
+.docx-preview-container .docx-wrapper {
+  @apply bg-transparent !important;
+  padding: 0 !important;
+}
+
+.docx-preview-container .docx {
+  @apply shadow-none !important;
+  margin-bottom: 0 !important;
+}
+
+.dark .docx-preview-container .docx {
+  @apply bg-gray-800 text-gray-200 !important;
+}
 .katex-display {
   @apply overflow-x-auto overflow-y-hidden py-2;
 }

@@ -149,6 +149,7 @@ export default function LLMsAdminPage() {
               <option value="">全部类型</option>
               <option value="chat">对话模型</option>
               <option value="embedding">嵌入模型</option>
+              <option value="rerank">重排序模型</option>
             </Select>
           </div>
           <Button onClick={() => setShowCreateModal(true)}>
@@ -184,9 +185,12 @@ export default function LLMsAdminPage() {
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">{llm.name}</td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <span className={`px-2 py-1 text-xs rounded-full ${
-                      llm.model_type === 'chat' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
+                      llm.model_type === 'chat' ? 'bg-blue-100 text-blue-800' : 
+                      llm.model_type === 'embedding' ? 'bg-purple-100 text-purple-800' :
+                      'bg-orange-100 text-orange-800'
                     }`}>
-                      {llm.model_type === 'chat' ? '对话' : '嵌入'}
+                      {llm.model_type === 'chat' ? '对话' : 
+                       llm.model_type === 'embedding' ? '嵌入' : '重排'}
                     </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{llm.provider}</td>
@@ -225,8 +229,12 @@ export default function LLMsAdminPage() {
       <Modal isOpen={showCreateModal} onClose={() => setShowCreateModal(false)} title="添加LLM" size="md">
         <div className="space-y-4">
           <Input label="名称" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="如: GPT-4" />
-          <Select label="类型" value={formData.model_type} onChange={(e) => setFormData({ ...formData, model_type: e.target.value as 'chat' | 'embedding' })}
-            options={[{ value: 'chat', label: '对话模型' }, { value: 'embedding', label: 'Embedding模型' }]} />
+          <Select label="类型" value={formData.model_type} onChange={(e) => setFormData({ ...formData, model_type: e.target.value as 'chat' | 'embedding' | 'rerank' })}
+            options={[
+              { value: 'chat', label: '对话模型' },
+              { value: 'embedding', label: 'Embedding模型' },
+              { value: 'rerank', label: '重排序模型' }
+            ]} />
           <Input label="提供商" value={formData.provider} onChange={(e) => setFormData({ ...formData, provider: e.target.value })} placeholder="openai / azure / local" />
           <Input label="模型标识" value={formData.model_name} onChange={(e) => setFormData({ ...formData, model_name: e.target.value })} placeholder="gpt-4 / text-embedding-ada-002" />
           <Input label="Base URL (可选)" value={formData.base_url || ''} onChange={(e) => setFormData({ ...formData, base_url: e.target.value })} placeholder="API基础地址" />

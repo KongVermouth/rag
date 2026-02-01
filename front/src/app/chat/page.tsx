@@ -128,6 +128,7 @@ export default function ChatPage() {
     setIsSending,
     sidebarOpen,
     resetChat,
+    createNewSession,
     streamingContent,
     reasoningContent,
     isStreamingFinished,
@@ -153,8 +154,8 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   // 使用 ref 保存当前消息列表，避免流式响应回调中状态不一致
   const messagesRef = useRef<ChatHistoryItem[]>([]);
-  // 标记当前正在流式输出的消息ID
-  const streamingMessageIdRef = useRef<string | null>(null);
+  // 标记当前正在流式输出的消息ID，用于版本校验防止缓存污染
+  const currentStreamingMessageIdRef = useRef<string | null>(null);
 
   // 监听 messages 变化，同步更新 ref
   useEffect(() => {
@@ -211,6 +212,14 @@ export default function ChatPage() {
     }
   }, [isStreamingFinished, reasoningContent, resetStreaming]);
 
+  // 会话切换或重置时，确保流式状态被重置
+  useEffect(() => {
+    if (!currentSession) {
+      resetStreaming();
+      currentStreamingMessageIdRef.current = null;
+    }
+  }, [currentSession, resetStreaming]);
+
   const loadSessions = async () => {
     if (!currentRobot) return;
     setLoadingSessions(true);
@@ -239,26 +248,44 @@ export default function ChatPage() {
   };
 
   const handleNewChat = () => {
-    resetChat();
+    // 1. 取消正在进行的请求
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    // 2. 原子操作：重置状态并生成新 sessionId
+    if (currentRobot) {
+      createNewSession(currentRobot.id);
+    } else {
+      resetChat();
+    }
+
+    // 3. 重置本地状态
     setQuestion('');
-    setIsNewChat(true); // 标记为新对话模式
-    // 保留会话列表，只清空当前会话状态
-    // 同步清空 ref
+    setIsNewChat(true);
+    setIsSending(false);
     messagesRef.current = [];
-    // 清除流式消息标记
-    streamingMessageIdRef.current = null;
+    currentStreamingMessageIdRef.current = null;
+    resetStreaming();
+
+    toast.success('已开启新对话');
   };
 
   const handleSelectSession = (sessionId: string) => {
-    setIsNewChat(false); // 标记为非新对话模式
-    // 取消正在进行的流式请求
+    // 1. 取消正在进行的流式请求
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
       setIsSending(false);
     }
-    // 清除流式消息标记
-    streamingMessageIdRef.current = null;
+
+    // 2. 重置流式状态
+    resetStreaming();
+    currentStreamingMessageIdRef.current = null;
+
+    // 3. 加载新会话
+    setIsNewChat(false);
     loadSessionMessages(sessionId);
   };
 
@@ -284,77 +311,35 @@ export default function ChatPage() {
     const userQuestion = question.trim();
     setQuestion('');
     setIsSending(true);
-    // 注意：不要在这里调用 resetStreaming()
-    // 因为 streamingContent 会在消息渲染时被使用
-    // 我们在流式响应完成后再重置 streamingContent
 
-    // 确保有有效的会话ID
+    // 1. 强制清理上一次的流式内容，防止“闪现”
+    resetStreaming();
+    setStreamingFinished(false);
+
+    // 2. 确保有有效的会话ID
     let sessionId = currentSession?.session_id;
-    if (!sessionId) {
-      if (isNewChat) {
-        // 新对话模式，不加载旧会话，直接创建新会话
-        sessionId = undefined;
-        // 加载会话列表更新侧边栏
-        try {
-          const data = await sessionApi.getList({ robot_id: currentRobot.id, status_filter: 'active' });
-          // 检查是否有已存在的活跃会话（可能是上一个问题创建的）
-          if (data.sessions.length > 0) {
-            // 使用最新的会话
-            sessionId = data.sessions[0].session_id;
-            const session = data.sessions[0];
-            setCurrentSession(session);
-            setIsNewChat(false);
-            // 加载该会话的消息
-            const sessionData = await sessionApi.getById(sessionId);
-            messagesRef.current = sessionData.messages || [];
-            setMessages(sessionData.messages);
-          }
-        } catch (error) {
-          console.error('加载会话列表失败', error);
-        }
-      } else {
-        // 非新对话模式（用户选择了某个会话），加载会话列表
-        try {
-          const data = await sessionApi.getList({ robot_id: currentRobot.id, status_filter: 'active' });
-          setSessions(data.sessions);
-          if (data.sessions.length > 0) {
-            sessionId = data.sessions[0].session_id;
-            const session = data.sessions[0];
-            setCurrentSession(session);
-            // 加载该会话的消息
-            const sessionData = await sessionApi.getById(sessionId);
-            messagesRef.current = sessionData.messages || [];
-            setMessages(sessionData.messages);
-          }
-        } catch (error) {
-          toast.error('加载会话失败');
-          setIsSending(false);
-          return;
-        }
-      }
+    // 如果没有会话ID，且是新对话模式，则使用 createNewSession 生成的 ID
+    if (!sessionId && isNewChat) {
+      sessionId = createNewSession(currentRobot.id);
     }
+
+    // 3. 创建助手占位消息，并记录其 ID 用于版本校验
+    const assistantMessageId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    currentStreamingMessageIdRef.current = assistantMessageId;
 
     // 创建AbortController用于取消请求
     abortControllerRef.current = new AbortController();
-    // 重置会话创建状态
-    sessionCreatedRef.current = false;
-    // 重置流式开始标记
+    sessionCreatedRef.current = !!sessionId;
     streamingStartedRef.current = false;
 
-    // 添加用户消息和助手占位符
-    const userMessageId = `temp-${Date.now()}`;
-    const assistantMessageId = `temp-${Date.now() + 1}`;
-
     const userMessage: ChatHistoryItem = {
-      message_id: userMessageId,
+      message_id: `user-${Date.now()}`,
       role: 'user',
       content: userQuestion,
       created_at: new Date().toISOString(),
     };
 
-    // 总是保留现有消息，只有在开始新对话按钮点击后才清空
-    const existingMessages = messages && messages.length > 0 ? [...messages] : [];
-    const newMessages: ChatHistoryItem[] = [...existingMessages, userMessage, {
+    const newMessages: ChatHistoryItem[] = [...messages, userMessage, {
       message_id: assistantMessageId,
       role: 'assistant',
       content: '',
@@ -362,18 +347,14 @@ export default function ChatPage() {
       reasoning_content: '',
     }];
 
-    // 初始化折叠状态（默认为展开）
     setReasoningFoldedMap(prev => {
       const newMap = new Map(prev);
       newMap.set(assistantMessageId, false);
       return newMap;
     });
 
-    // 同步更新 ref 和 store
     messagesRef.current = newMessages;
     setMessages(newMessages);
-    // 标记当前正在流式输出的消息ID
-    streamingMessageIdRef.current = assistantMessageId;
 
     try {
       await chatApi.askStream(
@@ -383,8 +364,12 @@ export default function ChatPage() {
           session_id: sessionId,
         },
         (chunk: ChatStreamChunk) => {
-          // 获取事件类型
-          const eventType = (chunk as any)._eventType || '';
+          // 4. 版本校验：若当前消息 ID 已变（如已切换会话或重新开始），丢弃该 chunk
+          if (currentStreamingMessageIdRef.current !== assistantMessageId) {
+            console.warn('丢弃过期 chunk:', assistantMessageId);
+            return;
+          }
+
           const chunkType = chunk.type;
 
           // 处理不同的数据类型
@@ -477,7 +462,7 @@ export default function ChatPage() {
             setStreamingFinished(true);
             abortControllerRef.current = null;
             // 清除流式消息标记
-            streamingMessageIdRef.current = null;
+            currentStreamingMessageIdRef.current = null;
 
             const fullAnswer = (chunk as any).full_answer || streamingContent;
             const fullReasoning = (chunk as any).full_reasoning_content || reasoningContent;
@@ -538,7 +523,7 @@ export default function ChatPage() {
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         // 请求被取消，不显示错误
-        streamingMessageIdRef.current = null;
+        currentStreamingMessageIdRef.current = null;
         return;
       }
       const message = error instanceof Error ? error.message : '发送失败';
@@ -551,11 +536,11 @@ export default function ChatPage() {
         }
         return messages;
       });
-      streamingMessageIdRef.current = null;
+      currentStreamingMessageIdRef.current = null;
     } finally {
       setIsSending(false);
       abortControllerRef.current = null;
-      streamingMessageIdRef.current = null;
+      currentStreamingMessageIdRef.current = null;
       // 注意：不要调用 resetStreaming()，因为 finished 事件已经处理完内容了
       // 流式内容会保留用于显示思考过程
     }
@@ -683,7 +668,7 @@ export default function ChatPage() {
       </div>
 
       {/* 主聊天区域 */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col" key={currentSession?.session_id || 'new'}>
         {/* 消息列表 */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.length === 0 ? (
@@ -709,7 +694,7 @@ export default function ChatPage() {
                   )}
                 >
                   {/* 思考过程（如果有） */}
-                  {message.role === 'assistant' && (message.reasoning_content || (isSending && reasoningContent && streamingMessageIdRef.current === message.message_id)) && (
+                  {message.role === 'assistant' && (message.reasoning_content || (isSending && reasoningContent && currentStreamingMessageIdRef.current === message.message_id)) && (
                     <ThinkingProcess
                       content={message.reasoning_content || (reasoningContent || '')}
                       isExpanded={!reasoningFoldedMap.get(message.message_id)}
@@ -720,13 +705,13 @@ export default function ChatPage() {
                   <MarkdownRenderer
                     content={
                       message.role === 'assistant'
-                        ? (message.content || (isSending && streamingMessageIdRef.current === message.message_id ? streamingContent : ''))
+                        ? (message.content || (isSending && currentStreamingMessageIdRef.current === message.message_id ? streamingContent : ''))
                         : message.content
                     }
                   />
 
                   {/* 流式思考过程指示器（仅在发送中且没有完整内容时显示） */}
-                  {message.role === 'assistant' && isSending && reasoningContent && !message.reasoning_content && streamingMessageIdRef.current === message.message_id && (
+                  {message.role === 'assistant' && isSending && reasoningContent && !message.reasoning_content && currentStreamingMessageIdRef.current === message.message_id && (
                     <StreamingThinkingProcess content={reasoningContent} isGenerating={true} />
                   )}
 

@@ -1,5 +1,5 @@
 """
-会话服务
+会话服务 (异步)
 负责会话的CRUD操作和历史记录管理
 """
 import uuid
@@ -7,8 +7,8 @@ import logging
 from typing import Optional, List, Tuple
 from datetime import datetime, timedelta
 
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, and_
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc, and_, func, update
 from fastapi import HTTPException, status
 
 from app.models.session import Session as SessionModel
@@ -30,30 +30,20 @@ logger = logging.getLogger(__name__)
 class SessionService:
     """会话服务类"""
     
-    def create_session(
+    async def create_session(
         self,
-        db: Session,
+        db: AsyncSession,
         user: User,
         robot_id: int,
         title: Optional[str] = None
     ) -> SessionModel:
-        """
-        创建新会话
-        
-        Args:
-            db: 数据库会话
-            user: 当前用户
-            robot_id: 机器人ID
-            title: 会话标题（可选）
-            
-        Returns:
-            创建的会话对象
-        """
+        """创建新会话"""
         # 验证机器人存在且用户有权限
-        robot = db.query(Robot).filter(
+        result = await db.execute(select(Robot).where(
             Robot.id == robot_id,
             Robot.user_id == user.id
-        ).first()
+        ))
+        robot = result.scalar_one_or_none()
         
         if not robot:
             raise HTTPException(
@@ -75,11 +65,11 @@ class SessionService:
         )
         
         db.add(session)
-        db.commit()
-        db.refresh(session)
+        await db.commit()
+        await db.refresh(session)
         
-        # 初始化Redis上下文
-        context_manager.init_context(
+        # 初始化Redis上下文 (Async)
+        await context_manager.init_context(
             session_id=session_id,
             user_id=user.id,
             robot_id=robot_id,
@@ -90,28 +80,17 @@ class SessionService:
         
         return session
     
-    def get_or_create_session(
+    async def get_or_create_session(
         self,
-        db: Session,
+        db: AsyncSession,
         user: User,
         robot_id: int,
         session_id: Optional[str] = None
     ) -> Tuple[SessionModel, bool]:
-        """
-        获取或创建会话
-        
-        Args:
-            db: 数据库会话
-            user: 当前用户
-            robot_id: 机器人ID
-            session_id: 会话ID（可选，不传则创建新会话）
-            
-        Returns:
-            (会话对象, 是否新创建)
-        """
+        """获取或创建会话"""
         if session_id:
             # 获取现有会话
-            session = self.get_session_by_id(db, session_id, user)
+            session = await self.get_session_by_id(db, session_id, user)
             if session:
                 # 验证robot_id匹配
                 if session.robot_id != robot_id:
@@ -122,73 +101,56 @@ class SessionService:
                 return session, False
         
         # 创建新会话
-        session = self.create_session(db, user, robot_id)
+        session = await self.create_session(db, user, robot_id)
         return session, True
     
-    def get_session_by_id(
+    async def get_session_by_id(
         self,
-        db: Session,
+        db: AsyncSession,
         session_id: str,
         user: User
     ) -> Optional[SessionModel]:
-        """
-        根据ID获取会话
-        
-        Args:
-            db: 数据库会话
-            session_id: 会话UUID
-            user: 当前用户
-            
-        Returns:
-            会话对象，不存在返回None
-        """
-        session = db.query(SessionModel).filter(
+        """根据ID获取会话"""
+        result = await db.execute(select(SessionModel).where(
             SessionModel.session_id == session_id,
             SessionModel.user_id == user.id,
             SessionModel.status != "deleted"
-        ).first()
+        ))
+        session = result.scalar_one_or_none()
         
         return session
     
-    def get_user_sessions(
+    async def get_user_sessions(
         self,
-        db: Session,
+        db: AsyncSession,
         user: User,
         robot_id: Optional[int] = None,
         status_filter: str = "active",
         skip: int = 0,
         limit: int = 20
     ) -> SessionListResponse:
-        """
-        获取用户的会话列表
-        
-        Args:
-            db: 数据库会话
-            user: 当前用户
-            robot_id: 机器人ID筛选（可选）
-            status_filter: 状态筛选
-            skip: 跳过数量
-            limit: 返回数量
-            
-        Returns:
-            会话列表响应
-        """
-        query = db.query(SessionModel).filter(
+        """获取用户的会话列表"""
+        query = select(SessionModel).where(
             SessionModel.user_id == user.id,
             SessionModel.status == status_filter
         )
         
         if robot_id:
-            query = query.filter(SessionModel.robot_id == robot_id)
+            query = query.where(SessionModel.robot_id == robot_id)
         
         # 获取总数
-        total = query.count()
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar()
         
         # 分页查询（置顶的在前，然后按最后消息时间排序）
-        sessions = query.order_by(
+        query = query.order_by(
             desc(SessionModel.is_pinned),
             desc(SessionModel.last_message_at)
-        ).offset(skip).limit(limit).all()
+        ).offset(skip).limit(limit)
+        
+        result = await db.execute(query)
+        sessions = result.scalars().all()
         
         # 转换为响应格式
         session_infos = [
@@ -208,26 +170,15 @@ class SessionService:
         
         return SessionListResponse(total=total, sessions=session_infos)
     
-    def update_session(
+    async def update_session(
         self,
-        db: Session,
+        db: AsyncSession,
         session_id: str,
         user: User,
         update_data: SessionUpdate
     ) -> SessionModel:
-        """
-        更新会话信息
-        
-        Args:
-            db: 数据库会话
-            session_id: 会话UUID
-            user: 当前用户
-            update_data: 更新数据
-            
-        Returns:
-            更新后的会话对象
-        """
-        session = self.get_session_by_id(db, session_id, user)
+        """更新会话信息"""
+        session = await self.get_session_by_id(db, session_id, user)
         if not session:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -242,34 +193,24 @@ class SessionService:
         if update_data.status is not None:
             if update_data.status in ["active", "archived"]:
                 session.status = update_data.status
-                # 如果归档，清除Redis上下文
+                # 如果归档，清除Redis上下文 (Async)
                 if update_data.status == "archived":
-                    context_manager.clear_context(session_id)
-                    redis_client.remove_from_active_sessions(user.id, session_id)
+                    await context_manager.clear_context(session_id)
+                    await redis_client.remove_from_active_sessions(user.id, session_id)
         
-        db.commit()
-        db.refresh(session)
+        await db.commit()
+        await db.refresh(session)
         
         return session
     
-    def delete_session(
+    async def delete_session(
         self,
-        db: Session,
+        db: AsyncSession,
         session_id: str,
         user: User
     ) -> bool:
-        """
-        删除会话（软删除）
-        
-        Args:
-            db: 数据库会话
-            session_id: 会话UUID
-            user: 当前用户
-            
-        Returns:
-            是否成功
-        """
-        session = self.get_session_by_id(db, session_id, user)
+        """删除会话（软删除）"""
+        session = await self.get_session_by_id(db, session_id, user)
         if not session:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -278,36 +219,25 @@ class SessionService:
         
         # 软删除
         session.status = "deleted"
-        db.commit()
+        await db.commit()
         
-        # 清除Redis上下文
-        context_manager.clear_context(session_id)
-        redis_client.remove_from_active_sessions(user.id, session_id)
+        # 清除Redis上下文 (Async)
+        await context_manager.clear_context(session_id)
+        await redis_client.remove_from_active_sessions(user.id, session_id)
         
         logger.info(f"删除会话: {session_id}")
         
         return True
     
-    def get_session_detail(
+    async def get_session_detail(
         self,
-        db: Session,
+        db: AsyncSession,
         session_id: str,
         user: User,
         message_limit: int = 50
     ) -> SessionDetailResponse:
-        """
-        获取会话详情（包含历史消息）
-        
-        Args:
-            db: 数据库会话
-            session_id: 会话UUID
-            user: 当前用户
-            message_limit: 消息数量限制
-            
-        Returns:
-            会话详情响应
-        """
-        session = self.get_session_by_id(db, session_id, user)
+        """获取会话详情（包含历史消息）"""
+        session = await self.get_session_by_id(db, session_id, user)
         if not session:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -315,9 +245,12 @@ class SessionService:
             )
         
         # 获取历史消息
-        messages = db.query(ChatHistory).filter(
-            ChatHistory.session_id == session_id
-        ).order_by(ChatHistory.sequence.asc()).limit(message_limit).all()
+        result = await db.execute(
+            select(ChatHistory).where(
+                ChatHistory.session_id == session_id
+            ).order_by(ChatHistory.sequence.asc()).limit(message_limit)
+        )
+        messages = result.scalars().all()
         
         # 转换响应
         session_info = SessionInfo(
@@ -361,9 +294,9 @@ class SessionService:
         
         return SessionDetailResponse(session=session_info, messages=message_items)
     
-    def save_chat_message(
+    async def save_chat_message(
         self,
-        db: Session,
+        db: AsyncSession,
         session_id: str,
         role: str,
         content: str,
@@ -371,25 +304,12 @@ class SessionService:
         token_usage: dict = None,
         time_metrics: dict = None
     ) -> ChatHistory:
-        """
-        保存聊天消息到历史记录
-        
-        Args:
-            db: 数据库会话
-            session_id: 会话UUID
-            role: 角色 (user/assistant)
-            content: 消息内容
-            contexts: 检索上下文（仅assistant）
-            token_usage: Token统计（仅assistant）
-            time_metrics: 时间指标（仅assistant）
-            
-        Returns:
-            保存的消息记录
-        """
+        """保存聊天消息到历史记录"""
         # 获取当前会话的消息序号
-        max_seq = db.query(ChatHistory).filter(
-            ChatHistory.session_id == session_id
-        ).count()
+        count_result = await db.execute(
+            select(func.count()).where(ChatHistory.session_id == session_id)
+        )
+        max_seq = count_result.scalar()
         
         message_id = str(uuid.uuid4())
         
@@ -418,9 +338,8 @@ class SessionService:
         db.add(chat_history)
         
         # 更新会话元数据
-        session = db.query(SessionModel).filter(
-            SessionModel.session_id == session_id
-        ).first()
+        result = await db.execute(select(SessionModel).where(SessionModel.session_id == session_id))
+        session = result.scalar_one_or_none()
         
         if session:
             session.message_count = max_seq + 1
@@ -431,32 +350,23 @@ class SessionService:
                 # 使用问题的前50个字符作为标题
                 session.title = content[:50] + ("..." if len(content) > 50 else "")
         
-        db.commit()
-        db.refresh(chat_history)
+        await db.commit()
+        await db.refresh(chat_history)
         
         return chat_history
     
-    def update_feedback(
+    async def update_feedback(
         self,
-        db: Session,
+        db: AsyncSession,
         user: User,
         feedback_request: FeedbackRequest
     ) -> bool:
-        """
-        更新消息反馈
-        
-        Args:
-            db: 数据库会话
-            user: 当前用户
-            feedback_request: 反馈请求
-            
-        Returns:
-            是否成功
-        """
+        """更新消息反馈"""
         # 获取消息
-        message = db.query(ChatHistory).filter(
+        result = await db.execute(select(ChatHistory).where(
             ChatHistory.message_id == feedback_request.message_id
-        ).first()
+        ))
+        message = result.scalar_one_or_none()
         
         if not message:
             raise HTTPException(
@@ -465,10 +375,11 @@ class SessionService:
             )
         
         # 验证用户权限
-        session = db.query(SessionModel).filter(
+        session_result = await db.execute(select(SessionModel).where(
             SessionModel.session_id == message.session_id,
             SessionModel.user_id == user.id
-        ).first()
+        ))
+        session = session_result.scalar_one_or_none()
         
         if not session:
             raise HTTPException(
@@ -480,38 +391,30 @@ class SessionService:
         message.feedback = feedback_request.feedback
         message.feedback_comment = feedback_request.comment
         
-        db.commit()
+        await db.commit()
         
         return True
     
-    def archive_inactive_sessions(self, db: Session) -> int:
-        """
-        归档不活跃的会话（定时任务调用）
-        
-        Args:
-            db: 数据库会话
-            
-        Returns:
-            归档的会话数量
-        """
+    async def archive_inactive_sessions(self, db: AsyncSession) -> int:
+        """归档不活跃的会话（定时任务调用）"""
         threshold = datetime.now() - timedelta(days=settings.SESSION_ARCHIVE_DAYS)
         
         # 查找需要归档的会话
-        sessions_to_archive = db.query(SessionModel).filter(
+        result = await db.execute(select(SessionModel).where(
             SessionModel.status == "active",
             SessionModel.last_message_at < threshold
-        ).all()
+        ))
+        sessions_to_archive = result.scalars().all()
         
         count = 0
         for session in sessions_to_archive:
             session.status = "archived"
-            # 清除Redis上下文
-            context_manager.clear_context(session.session_id)
+            # 清除Redis上下文 (Async)
+            await context_manager.clear_context(session.session_id)
             count += 1
         
-        db.commit()
-        
         if count > 0:
+            await db.commit()
             logger.info(f"归档了 {count} 个不活跃会话")
         
         return count

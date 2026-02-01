@@ -128,14 +128,81 @@ front/
 └── Dockerfile                    # Docker 部署配置
 ```
 
-## 功能模块
+## 1. 系统认证与安全性
 
-### 1. 用户认证
-- 用户注册
-- 用户登录
-- JWT Token 管理
-- 自动登录状态保持
-- Token 过期自动跳转登录
+### 1.1 登录流程时序 (Sequnce Diagram)
+
+前端通过 Zustand 状态管理与后端 JWT 认证服务交互。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Browser as 浏览器/用户
+    participant Store as Zustand (AuthStore)
+    participant Axios as API Client (Axios)
+    participant Backend as Backend API
+
+    Browser->>Store: login(username, password)
+    Store->>Axios: POST /api/v1/auth/login
+    Axios->>Backend: 提交登录凭证
+    Backend-->>Axios: 返回 JWT Token
+    Axios-->>Store: 存储 Token 到 localStorage
+    Store-->>Browser: 登录成功，跳转首页
+
+    Note over Axios, Backend: 后续请求自动携带 Header
+    Browser->>Axios: 发起业务请求
+    Axios->>Axios: 注入 Authorization: Bearer {token}
+    Axios->>Backend: 请求数据
+    Backend-->>Axios: 响应结果
+```
+
+### 1.2 安全策略
+- **Token 存储**: 存储在 `localStorage` 中，并通过 `auth-store.ts` 进行响应式管理。
+- **请求拦截**: 使用 Axios 拦截器 (`src/lib/api-client.ts`) 统一注入 `Authorization` 头。
+- **异常处理**: 当后端返回 `401 Unauthorized` 时，前端自动清除本地 Token 并重定向至 `/auth/login`。
+
+---
+
+## 2. 数据库架构 (视图)
+
+虽然数据库由后端直接管理，但前端模型与其紧密对应。
+
+### 2.1 核心实体关系 (ERD)
+
+```mermaid
+erDiagram
+    User ||--o{ Knowledge : "创建"
+    User ||--o{ Robot : "创建"
+    Knowledge ||--o{ Document : "上传"
+    Robot ||--o{ RobotKnowledge : "关联"
+    Knowledge ||--o{ RobotKnowledge : "被关联"
+    Robot ||--o{ Session : "开启"
+    Session ||--o{ ChatHistory : "产生"
+
+    User {
+        string username
+        string role
+        int status
+    }
+    Knowledge {
+        string name
+        int chunk_size
+        int chunk_overlap
+    }
+    Document {
+        string file_name
+        string status "parsing/splitting/..."
+    }
+    Robot {
+        string name
+        float temperature
+        boolean enable_rerank
+    }
+```
+
+---
+
+## 3. 功能模块详细说明
 
 ### 2. 知识库管理
 - 创建/编辑/删除知识库
@@ -155,6 +222,7 @@ front/
 - 关联知识库
 - 设置系统提示词
 - 调整参数（temperature, top_k, max_tokens, similarity_threshold）
+- **集成编辑与测试页面**: 提供左右分栏的机器人编辑与召回效果测试一体化界面，支持实时保存与分栏宽度拖拽记忆。
 
 ### 5. 聊天界面
 - 实时对话
@@ -197,7 +265,9 @@ front/
 | 重新处理文档 | `/api/v1/documents/{id}/reprocess` | POST |
 | 机器人列表 | `/api/v1/robots` | GET |
 | 创建机器人 | `/api/v1/robots` | POST |
+| 获取机器人详情 | `/api/v1/robots/{id}` | GET |
 | 更新机器人 | `/api/v1/robots/{id}` | PUT |
+| 机器人召回测试 | `/api/v1/robots/{id}/retrieval-test` | POST |
 | 删除机器人 | `/api/v1/robots/{id}` | DELETE |
 | 对话问答 | `/api/v1/chat/ask` | POST |
 | 测试检索 | `/api/v1/chat/test` | POST |

@@ -37,6 +37,12 @@ class Settings(BaseSettings):
         encoded_password = quote_plus(self.DB_PASSWORD)
         return f"mysql+pymysql://{self.DB_USER}:{encoded_password}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?charset=utf8mb4"
     
+    @property
+    def ASYNC_DATABASE_URL(self) -> str:
+        """构建异步数据库连接URL"""
+        encoded_password = quote_plus(self.DB_PASSWORD)
+        return f"mysql+aiomysql://{self.DB_USER}:{encoded_password}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?charset=utf8mb4"
+    
     # ==================== Redis配置 ====================
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
@@ -106,6 +112,10 @@ class Settings(BaseSettings):
     USE_CELERY: bool = False  # 是否使用Celery异步处理，设为False则使用同步处理
     CELERY_TASK_QUEUE: str = "rag_tasks"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
+
+    # ==================== Kafka配置 ====================
+    KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9094"  # 外部访问端口，内部服务应使用 kafka:9092
+    KAFKA_CONSUMER_GROUP: str = "rag_group"
     
     # ==================== 初始化配置 ====================
     INIT_DB_ON_STARTUP: bool = True

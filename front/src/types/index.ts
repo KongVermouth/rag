@@ -110,6 +110,11 @@ export interface Document {
   file_extension: string;
   file_size: number;
   file_path: string;
+  mime_type?: string;
+  width?: number;
+  height?: number;
+  preview_url?: string;
+  thumbnail_url?: string;
   status: 'uploading' | 'parsing' | 'embedding' | 'completed' | 'failed';
   chunk_count: number;
   error_msg?: string;
@@ -121,6 +126,10 @@ export interface DocumentUploadResponse {
   document_id: number;
   filename: string;
   file_size: number;
+  preview_url?: string;
+  mime_type?: string;
+  width?: number;
+  height?: number;
   task_id?: string;
   message: string;
 }
@@ -136,14 +145,66 @@ export interface DocumentStatus {
 export interface DocumentListResponse extends PaginatedResponse<Document> {}
 
 /**
+ * 召回测试相关类型
+ */
+export interface RecallTestQuery {
+  query: string;
+  expected_doc_ids?: number[];
+}
+
+export interface RecallTestRequest {
+  queries: RecallTestQuery[];
+  topN: number;
+  threshold: number;
+  knowledge_ids: number[];
+  robot_id?: number;
+}
+
+export interface RecallTestResultItem {
+  query: string;
+  recall: number;
+  precision: number;
+  f1: number;
+  top_n_hit: boolean;
+  retrieved_docs: {
+    document_id: number;
+    filename: string;
+    score: number;
+    content: string;
+  }[];
+  expected_doc_ids?: number[];
+  latency: number;
+}
+
+export interface RecallTestStatusResponse {
+  taskId: string;
+  status: 'pending' | 'running' | 'finished' | 'failed';
+  progress: number;
+  estimated_remaining_time?: number;
+  results?: RecallTestResultItem[];
+  summary?: {
+    avg_recall: number;
+    avg_precision: number;
+    avg_f1: number;
+    top_n_hit_rate: number;
+    avg_latency: number;
+  };
+  error?: string;
+}
+
+/**
  * 机器人相关类型
  */
 export interface Robot {
   id: number;
   name: string;
+  avatar?: string;
   chat_llm_id: number;
+  rerank_llm_id?: number;
   system_prompt: string;
+  welcome_message?: string;
   top_k: number;
+  enable_rerank: boolean;
   temperature: number;
   max_tokens: number;
   description?: string;
@@ -154,12 +215,16 @@ export interface Robot {
   updated_at: string;
 }
 
+export type RobotDetail = Robot;
+
 export interface RobotCreate {
   name: string;
   chat_llm_id: number;
+  rerank_llm_id?: number;
   knowledge_ids: number[];
   system_prompt?: string;
   top_k?: number;
+  enable_rerank?: boolean;
   temperature?: number;
   max_tokens?: number;
   description?: string;
@@ -168,9 +233,11 @@ export interface RobotCreate {
 export interface RobotUpdate {
   name?: string;
   chat_llm_id?: number;
+  rerank_llm_id?: number;
   knowledge_ids?: number[];
   system_prompt?: string;
   top_k?: number;
+  enable_rerank?: boolean;
   temperature?: number;
   max_tokens?: number;
   description?: string;
@@ -186,12 +253,33 @@ export interface RobotBrief {
 export interface RobotListResponse extends PaginatedResponse<Robot> {}
 
 /**
+ * 召回测试相关类型
+ */
+export interface RetrievalTestRequest {
+  query: string;
+  top_k: number;
+  threshold: number;
+}
+
+export interface RetrievalTestResultItem {
+  id: string;
+  score: number;
+  content: string;
+  document_id: number;
+  filename: string;
+}
+
+export interface RetrievalTestResponse {
+  results: RetrievalTestResultItem[];
+}
+
+/**
  * LLM模型相关类型
  */
 export interface LLM {
   id: number;
   name: string;
-  model_type: 'embedding' | 'chat';
+  model_type: 'embedding' | 'chat' | 'rerank';
   provider: string;
   model_name: string;
   base_url?: string;
@@ -205,7 +293,7 @@ export interface LLM {
 
 export interface LLMCreate {
   name: string;
-  model_type: 'embedding' | 'chat';
+  model_type: 'embedding' | 'chat' | 'rerank';
   provider: string;
   model_name: string;
   base_url?: string;

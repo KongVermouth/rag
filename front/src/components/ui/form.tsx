@@ -83,3 +83,36 @@ export function Textarea({ className, label, error, id, ...props }: TextareaProp
     </div>
   );
 }
+
+interface SwitchProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  label?: string;
+}
+
+export function Switch({ className, label, id, ...props }: SwitchProps) {
+  const switchId = id || `switch-${Math.random().toString(36).substr(2, 9)}`;
+
+  return (
+    <div className="flex items-center space-x-2">
+      <div className="relative inline-flex h-6 w-11 items-center">
+        <input
+          type="checkbox"
+          id={switchId}
+          className={cn(
+            "peer h-6 w-11 cursor-pointer appearance-none rounded-full bg-gray-200 transition-colors checked:bg-blue-600 dark:bg-gray-700",
+            className
+          )}
+          {...props}
+        />
+        <span className="pointer-events-none absolute left-1 h-4 w-4 transform rounded-full bg-white transition-transform peer-checked:translate-x-5" />
+      </div>
+      {label && (
+        <label
+          htmlFor={switchId}
+          className="text-sm font-medium text-gray-700 dark:text-gray-300 cursor-pointer"
+        >
+          {label}
+        </label>
+      )}
+    </div>
+  );
+}

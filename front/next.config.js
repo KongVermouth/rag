@@ -30,6 +30,16 @@ const nextConfig = {
       },
     ];
   },
+
+  // 重写配置 (代理 API 请求)
+  async rewrites() {
+    return [
+      {
+        source: '/api/:path*',
+        destination: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/:path*`,
+      },
+    ];
+  },
 };
 
 module.exports = nextConfig;

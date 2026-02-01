@@ -3,7 +3,7 @@ API密钥管理API路由
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.core.deps import get_current_user, require_admin
@@ -23,9 +23,9 @@ router = APIRouter()
 # ==================== 管理员CRUD接口 ====================
 
 @router.post("", response_model=APIKeyDetail, summary="创建API Key")
-def create_apikey(
+async def create_apikey(
     apikey_data: APIKeyCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
     """
@@ -36,15 +36,15 @@ def create_apikey(
     - **api_key**: API密钥（明文，将被加密存储）
     - **description**: 密钥描述（可选）
     """
-    return apikey_service.create_apikey(db, apikey_data, current_user)
+    return await apikey_service.create_apikey(db, apikey_data, current_user)
 
 
 @router.get("", response_model=APIKeyListResponse, summary="获取API Key列表")
-def get_apikeys(
+async def get_apikeys(
     skip: int = Query(0, ge=0, description="跳过记录数"),
     limit: int = Query(20, ge=1, le=100, description="返回记录数"),
     llm_id: Optional[int] = Query(None, description="按LLM ID过滤"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
     """
@@ -52,13 +52,13 @@ def get_apikeys(
     
     支持分页和按LLM ID过滤
     """
-    return apikey_service.get_apikeys(db, current_user, skip, limit, llm_id)
+    return await apikey_service.get_apikeys(db, current_user, skip, limit, llm_id)
 
 
 @router.get("/options", response_model=APIKeyOptionsResponse, summary="获取可用的API Key选项")
-def get_apikey_options(
+async def get_apikey_options(
     llm_id: Optional[int] = Query(None, description="按LLM ID过滤"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -67,13 +67,13 @@ def get_apikey_options(
     返回状态为启用的API Key列表，供用户选择使用。
     只返回基本信息（ID、别名、关联LLM），不返回敏感信息。
     """
-    return apikey_service.get_available_apikey_options(db, current_user, llm_id)
+    return await apikey_service.get_available_apikey_options(db, current_user, llm_id)
 
 
 @router.get("/{apikey_id}", response_model=APIKeyDetail, summary="获取API Key详情")
-def get_apikey(
+async def get_apikey(
     apikey_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
     """
@@ -81,14 +81,14 @@ def get_apikey(
     
     API Key会以脱敏形式显示（如：sk-abcd****efgh）
     """
-    return apikey_service.get_apikey_by_id(db, apikey_id, current_user)
+    return await apikey_service.get_apikey_by_id(db, apikey_id, current_user)
 
 
 @router.put("/{apikey_id}", response_model=APIKeyDetail, summary="更新API Key")
-def update_apikey(
+async def update_apikey(
     apikey_id: int,
     apikey_data: APIKeyUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
     """
@@ -100,13 +100,13 @@ def update_apikey(
     - **description**: 密钥描述
     - **status**: 状态（0-禁用，1-启用）
     """
-    return apikey_service.update_apikey(db, apikey_id, apikey_data, current_user)
+    return await apikey_service.update_apikey(db, apikey_id, apikey_data, current_user)
 
 
 @router.delete("/{apikey_id}", summary="删除API Key")
-def delete_apikey(
+async def delete_apikey(
     apikey_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
     """
@@ -114,5 +114,5 @@ def delete_apikey(
     
     删除后不可恢复
     """
-    apikey_service.delete_apikey(db, apikey_id, current_user)
+    await apikey_service.delete_apikey(db, apikey_id, current_user)
     return {"message": "API Key删除成功"}

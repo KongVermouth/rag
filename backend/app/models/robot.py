@@ -1,7 +1,7 @@
 """
 问答机器人表模型
 """
-from sqlalchemy import Column, BigInteger, String, Integer, DateTime, Text, Float, Index
+from sqlalchemy import Column, BigInteger, String, Integer, DateTime, Text, Float, Index, Boolean
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.sql import func
 from app.db.session import Base
@@ -17,6 +17,7 @@ class Robot(Base):
     name = Column(String(100), nullable=False, comment="机器人名称")
     avatar = Column(String(255), nullable=True, comment="机器人头像")
     chat_llm_id = Column(BigInteger, nullable=False, comment="使用的对话模型ID")
+    rerank_llm_id = Column(BigInteger, nullable=True, comment="使用的重排序模型ID")
     description = Column(String(500), nullable=True, comment="机器人描述")
     
     # 提示词配置
@@ -27,6 +28,7 @@ class Robot(Base):
     # 检索配置 (RAG参数)
     similarity_threshold = Column(Float, default=0.6, comment="相似度阈值")
     top_k = Column(Integer, default=5, comment="召回切片数量")
+    enable_rerank = Column(Boolean, default=False, comment="是否启用重排序")
     
     # 生成配置
     temperature = Column(Float, default=0.7, comment="生成温度")

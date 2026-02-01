@@ -3,7 +3,8 @@
 """
 import logging
 from datetime import datetime, timedelta
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 
@@ -19,7 +20,7 @@ class AuthService:
     """认证服务类"""
 
     @staticmethod
-    def register(db: Session, user_data: UserRegister) -> User:
+    async def register(db: AsyncSession, user_data: UserRegister) -> User:
         """
         用户注册
         
@@ -34,7 +35,8 @@ class AuthService:
             HTTPException: 用户名或邮箱已存在
         """
         # 检查用户名是否已存在
-        existing_user = db.query(User).filter(User.username == user_data.username).first()
+        result = await db.execute(select(User).filter(User.username == user_data.username))
+        existing_user = result.scalars().first()
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -42,7 +44,8 @@ class AuthService:
             )
 
         # 检查邮箱是否已存在
-        existing_email = db.query(User).filter(User.email == user_data.email).first()
+        result = await db.execute(select(User).filter(User.email == user_data.email))
+        existing_email = result.scalars().first()
         if existing_email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -61,12 +64,12 @@ class AuthService:
                 updated_at=datetime.now()
             )
             db.add(new_user)
-            db.commit()
-            db.refresh(new_user)
+            await db.commit()
+            await db.refresh(new_user)
             logger.info(f"用户注册成功: {new_user.username} (ID: {new_user.id})")
             return new_user
         except IntegrityError as e:
-            db.rollback()
+            await db.rollback()
             logger.error(f"用户注册失败: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -74,7 +77,7 @@ class AuthService:
             )
 
     @staticmethod
-    def login(db: Session, login_data: UserLogin) -> TokenResponse:
+    async def login(db: AsyncSession, login_data: UserLogin) -> TokenResponse:
         """
         用户登录
         
@@ -89,9 +92,10 @@ class AuthService:
             HTTPException: 用户不存在、密码错误或账号被禁用
         """
         # 支持用户名或邮箱登录
-        user = db.query(User).filter(
+        result = await db.execute(select(User).filter(
             (User.username == login_data.username) | (User.email == login_data.username)
-        ).first()
+        ))
+        user = result.scalars().first()
 
         if not user:
             raise HTTPException(
@@ -129,7 +133,7 @@ class AuthService:
         )
 
     @staticmethod
-    def validate_token(db: Session, user_id: int) -> User:
+    async def validate_token(db: AsyncSession, user_id: int) -> User:
         """
         验证Token并返回用户信息
         
@@ -143,7 +147,8 @@ class AuthService:
         Raises:
             HTTPException: 用户不存在或账号被禁用
         """
-        user = db.query(User).filter(User.id == user_id).first()
+        result = await db.execute(select(User).filter(User.id == user_id))
+        user = result.scalars().first()
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

@@ -6,3 +6,5 @@ export { robotApi } from './robot';
 export { llmApi } from './llm';
 export { apiKeyApi } from './apikey';
 export { chatApi, sessionApi } from './chat';
+export { recallApi } from './recall';
+export { healthApi } from './health';

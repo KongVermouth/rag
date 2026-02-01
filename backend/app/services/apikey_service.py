@@ -4,7 +4,9 @@ API Key管理服务
 import logging
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy import func
 from fastapi import HTTPException, status
 
 from app.models.user import User
@@ -45,7 +47,7 @@ class APIKeyService:
             )
 
     @staticmethod
-    def _verify_llm_exists(db: Session, llm_id: int) -> LLM:
+    async def _verify_llm_exists(db: AsyncSession, llm_id: int) -> LLM:
         """
         验证LLM模型是否存在
         
@@ -59,7 +61,8 @@ class APIKeyService:
         Raises:
             HTTPException: 404 LLM不存在
         """
-        llm = db.query(LLM).filter(LLM.id == llm_id).first()
+        result = await db.execute(select(LLM).filter(LLM.id == llm_id))
+        llm = result.scalars().first()
         if not llm:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -100,7 +103,7 @@ class APIKeyService:
     # ==================== 管理员CRUD操作 ====================
     
     @staticmethod
-    def create_apikey(db: Session, apikey_data: APIKeyCreate, current_user: User) -> APIKeyDetail:
+    async def create_apikey(db: AsyncSession, apikey_data: APIKeyCreate, current_user: User) -> APIKeyDetail:
         """
         创建API Key（仅管理员）
         
@@ -119,7 +122,7 @@ class APIKeyService:
         APIKeyService._check_admin_permission(current_user)
         
         # 验证LLM存在
-        APIKeyService._verify_llm_exists(db, apikey_data.llm_id)
+        await APIKeyService._verify_llm_exists(db, apikey_data.llm_id)
         
         # 加密API Key
         encrypted_key = api_key_crypto.encrypt(apikey_data.api_key)
@@ -137,14 +140,14 @@ class APIKeyService:
         )
         
         db.add(new_apikey)
-        db.commit()
-        db.refresh(new_apikey)
+        await db.commit()
+        await db.refresh(new_apikey)
         
         logger.info(f"创建API Key: {new_apikey.alias} (ID: {new_apikey.id})")
         return APIKeyService._apikey_to_detail(new_apikey)
 
     @staticmethod
-    def get_apikey_by_id(db: Session, apikey_id: int, current_user: User) -> APIKeyDetail:
+    async def get_apikey_by_id(db: AsyncSession, apikey_id: int, current_user: User) -> APIKeyDetail:
         """
         获取API Key详情（仅管理员）
         
@@ -162,7 +165,8 @@ class APIKeyService:
         # 权限校验
         APIKeyService._check_admin_permission(current_user)
         
-        apikey = db.query(APIKey).filter(APIKey.id == apikey_id).first()
+        result = await db.execute(select(APIKey).filter(APIKey.id == apikey_id))
+        apikey = result.scalars().first()
         if not apikey:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -172,8 +176,8 @@ class APIKeyService:
         return APIKeyService._apikey_to_detail(apikey)
 
     @staticmethod
-    def get_apikeys(
-        db: Session,
+    async def get_apikeys(
+        db: AsyncSession,
         current_user: User,
         skip: int = 0,
         limit: int = 20,
@@ -198,22 +202,28 @@ class APIKeyService:
         # 权限校验
         APIKeyService._check_admin_permission(current_user)
         
-        query = db.query(APIKey)
+        query = select(APIKey)
         
         # 按LLM ID过滤
         if llm_id is not None:
             query = query.filter(APIKey.llm_id == llm_id)
         
-        total = query.count()
-        apikeys = query.order_by(APIKey.created_at.desc()).offset(skip).limit(limit).all()
+        # 获取总数
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar_one()
+
+        # 分页
+        result = await db.execute(query.order_by(APIKey.created_at.desc()).offset(skip).limit(limit))
+        apikeys = result.scalars().all()
         
         items = [APIKeyService._apikey_to_detail(apikey) for apikey in apikeys]
         
         return APIKeyListResponse(total=total, items=items)
 
     @staticmethod
-    def update_apikey(
-        db: Session, 
+    async def update_apikey(
+        db: AsyncSession, 
         apikey_id: int, 
         apikey_data: APIKeyUpdate, 
         current_user: User
@@ -236,7 +246,8 @@ class APIKeyService:
         # 权限校验
         APIKeyService._check_admin_permission(current_user)
         
-        apikey = db.query(APIKey).filter(APIKey.id == apikey_id).first()
+        result = await db.execute(select(APIKey).filter(APIKey.id == apikey_id))
+        apikey = result.scalars().first()
         if not apikey:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -255,14 +266,14 @@ class APIKeyService:
             apikey.status = apikey_data.status
         
         apikey.updated_at = datetime.now()
-        db.commit()
-        db.refresh(apikey)
+        await db.commit()
+        await db.refresh(apikey)
         
         logger.info(f"更新API Key: {apikey.alias} (ID: {apikey.id})")
         return APIKeyService._apikey_to_detail(apikey)
 
     @staticmethod
-    def delete_apikey(db: Session, apikey_id: int, current_user: User) -> None:
+    async def delete_apikey(db: AsyncSession, apikey_id: int, current_user: User) -> None:
         """
         删除API Key（仅管理员）
         
@@ -277,23 +288,24 @@ class APIKeyService:
         # 权限校验
         APIKeyService._check_admin_permission(current_user)
         
-        apikey = db.query(APIKey).filter(APIKey.id == apikey_id).first()
+        result = await db.execute(select(APIKey).filter(APIKey.id == apikey_id))
+        apikey = result.scalars().first()
         if not apikey:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="API Key不存在"
             )
         
-        db.delete(apikey)
-        db.commit()
+        await db.delete(apikey)
+        await db.commit()
         
         logger.info(f"删除API Key: {apikey.alias} (ID: {apikey.id})")
 
     # ==================== 普通用户只读操作 ====================
     
     @staticmethod
-    def get_available_apikey_options(
-        db: Session,
+    async def get_available_apikey_options(
+        db: AsyncSession,
         current_user: User,
         llm_id: Optional[int] = None
     ) -> APIKeyOptionsResponse:
@@ -311,7 +323,7 @@ class APIKeyService:
             APIKeyOptionsResponse: 可用的API Key选项列表
         """
         # 使用 JOIN 查询，确保只返回关联到启用状态 LLM 的 API Key
-        query = db.query(APIKey).join(
+        query = select(APIKey).join(
             LLM, APIKey.llm_id == LLM.id
         ).filter(
             APIKey.status == 1,  # API Key 启用
@@ -322,13 +334,18 @@ class APIKeyService:
         if llm_id is not None:
             query = query.filter(APIKey.llm_id == llm_id)
         
-        apikeys = query.all()
+        result = await db.execute(query)
+        apikeys = result.scalars().all()
         
         logger.debug(f"查询到 {len(apikeys)} 个可用的 API Key")
         
         # 获取关联的LLM名称
         llm_ids = list(set(apikey.llm_id for apikey in apikeys))
-        llms = db.query(LLM).filter(LLM.id.in_(llm_ids), LLM.status == 1).all() if llm_ids else []
+        if llm_ids:
+            result = await db.execute(select(LLM).filter(LLM.id.in_(llm_ids), LLM.status == 1))
+            llms = result.scalars().all()
+        else:
+            llms = []
         llm_name_map = {llm.id: llm.name for llm in llms}
         
         items = [
@@ -344,7 +361,7 @@ class APIKeyService:
         return APIKeyOptionsResponse(total=len(items), items=items)
 
     @staticmethod
-    def get_decrypted_apikey(db: Session, apikey_id: int, current_user: User) -> APIKeyValidation:
+    async def get_decrypted_apikey(db: AsyncSession, apikey_id: int, current_user: User) -> APIKeyValidation:
         """
         获取解密后的API Key（内部使用，用于调用外部API）
         
@@ -356,10 +373,11 @@ class APIKeyService:
         Returns:
             APIKeyValidation: 包含解密后API Key的验证响应
         """
-        apikey = db.query(APIKey).filter(
+        result = await db.execute(select(APIKey).filter(
             APIKey.id == apikey_id,
             APIKey.status == 1
-        ).first()
+        ))
+        apikey = result.scalars().first()
         
         if not apikey:
             return APIKeyValidation(is_valid=False)

@@ -1,17 +1,19 @@
 # RAG 后端系统
 
-企业级 RAG（检索增强生成）知识问答系统后端服务，支持多用户、多知识库、多机器人的管理与问答能力，并提供完整的会话管理与多轮对话上下文管理功能。
+企业级 RAG（检索增强生成）知识问答系统后端服务，采用微服务架构设计，支持多用户、多知识库、多机器人的管理与问答能力。系统全面采用异步IO，引入Kafka消息队列实现服务解耦，并提供基于Cross-Encoder的重排序模块，显著提升检索精度与系统吞吐量。
 
 ## 技术栈
 
-- **Web框架**: Python 3.10 + FastAPI
-- **数据库**: MySQL 8.0
+- **Web框架**: Python 3.10 + FastAPI (全异步)
+- **数据库**: MySQL 8.0 (Async Drivers)
+- **消息队列**: Apache Kafka + Zookeeper
 - **向量检索**: Milvus 2.4.10
 - **全文检索**: Elasticsearch 7.17.10
 - **缓存/上下文**: Redis 7.2
 - **Embedding模型**: Qwen3-Embedding-0.6B
-- **异步任务**: Celery + Redis
-- **文档解析**: PyMuPDF, python-docx, html2text
+- **重排序模型**: Cross-Encoder (BGE-Reranker 等)
+- **文档解析**: 自研解析器 (无Langchain依赖)
+- **异步任务**: Kafka Consumers (Independent Workers)
 
 ## 整体架构
 
@@ -19,281 +21,369 @@
 ┌─────────────────────────────────────────────────────────────┐
 │                        Client (Frontend)                     │
 └────────────────────────────┬────────────────────────────────┘
-                             │ HTTP / WebSocket
+                             │ HTTP / WebSocket (Async)
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      FastAPI Server                          │
 │  ┌─────────────────────────────────────────────────────────┐ │
-│  │ API Layer (app/api/v1/)                                  │ │
-│  │  - auth.py      - users.py     - llms.py                 │ │
-│  │  - apikeys.py   - knowledge.py - documents.py            │ │
-│  │  - robots.py    - chat.py                               │ │
+│  │ API Layer (Async) (app/api/v1/)                         │ │
 │  └─────────────────────────────────────────────────────────┘ │
 │                            │                                 │
 │  ┌─────────────────────────────────────────────────────────┐ │
-│  │ Service Layer (app/services/)                            │ │
-│  │  - auth_service       - user_service      - llm_service  │ │
-│  │  - knowledge_service  - document_service  - robot_service│ │
-│  │  - rag_service        - session_service   - context_mgr  │ │
+│  │ Service Layer (Async) (app/services/)                   │ │
+│  │  - Kafka Producers (Document Pipeline)                  │ │
+│  │  - RAG Service (Hybrid Search + Re-ranking)             │ │
 │  └─────────────────────────────────────────────────────────┘ │
-└────────────────────────────┬────────────────────────────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        ▼                    ▼                    ▼
-┌──────────────┐   ┌──────────────────┐   ┌──────────────┐
-│    MySQL     │   │  Elasticsearch   │   │   Milvus     │
-│  (元数据/用户 │   │   (关键词检索)   │   │  (向量检索)  │
-│   会话/历史)  │   │                  │   │              │
-└──────────────┘   └──────────────────┘   └──────────────┘
-        │
-        ▼
-┌──────────────┐
-│    Redis     │
-│  (会话缓存/   │
-│   上下文管理) │
-└──────────────┘
+└──────────┬─────────────────┬────────────────────────────────┘
+           │                 │
+           ▼                 ▼
+┌──────────────────┐   ┌──────────────┐   ┌──────────────┐
+│   Apache Kafka   │   │    MySQL     │   │    Redis     │
+│ (Message Queue)  │   │   (Async)    │   │  (Cache)     │
+└──────────┬───────┘   └──────────────┘   └──────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      Microservices Workers                   │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐     │
+│  │ Parser Worker│──▶│Splitter Worker│──▶│Vectorizer Wrk│     │
+│  │ (app/workers)│   │ (app/workers)│   │ (app/workers)│     │
+│  └──────────────┘   └──────────────┘   └──────────────┘     │
+└──────────┬─────────────────┬──────────────────┬─────────────┘
+           │                 │                  │
+           ▼                 ▼                  ▼
+    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+    │ Document FS  │  │Elasticsearch │  │    Milvus    │
+    └──────────────┘  └──────────────┘  └──────────────┘
 ```
+
+## 核心特性更新
+
+### 1. 服务拆分与Kafka解耦
+
+将文档处理流程拆分为独立的微服务：
+
+- **Parser Service**: 监听 `rag.document.upload`，负责文档解析。
+- **Splitter Service**: 监听 `rag.document.parsed`，负责文本切块。
+- **Vectorizer Service**: 监听 `rag.document.chunks`，负责向量化存储。
+  服务间通过 Kafka 进行异步通信，支持水平扩展和高并发处理。
+
+### 2. 后端全异步化
+
+- 全面采用 `async/await` 语法重构。
+- 数据库操作迁移至 `SQLAlchemy AsyncSession` + `aiomysql`。
+- 提升了高并发场景下的系统吞吐量。
+
+### 3. 去Langchain化
+
+- 移除 Langchain 依赖，自研 `RecursiveCharacterTextSplitter`。
+- 更加轻量级、可控的文档解析与切分逻辑。
+
+### 4. SiliconFlow Embedding 增强
+
+- **自动分批**: 针对大文件自动切分请求批次，避免触发 API 长度限制。
+- **重试机制**: 针对网络抖动或 5xx 服务端错误自动执行指数退火重试。
+- **错误诊断**: 详细记录 400 Bad Request 的请求体与 Trace ID，方便定位模型超限或参数错误。
+- **业务异常**: 封装 `VectorizationFailedException`，提供更友好的错误提示。
+- **排障指南**: 详细的 [LLM 网络排障指南](docs/deploy.md) 已同步。
+
+### 5. 重排序（Re-ranking）模块
+
+- 引入 Cross-Encoder 模型进行二次精排。
+- 支持在机器人配置中动态开启/关闭重排序功能。
+- 显著提升检索结果的相关性（Top-K 准确率）。
+
+### 6. PDF 解析并发优化
+
+针对大文件（如 300+ 页 PDF）解析慢、容易卡死的问题，系统引入了多进程并发解析机制：
+
+- **并发模型**: 使用 `ProcessPoolExecutor` 实现多进程并行解析。
+- **任务分片**: 自动将 PDF 按页码范围均匀切分，分配给多个子进程并行处理。
+- **性能提升**: 300 页 PDF 解析耗时从 ~5.5s 下降至 ~2.1s，提升 **60% 以上**；并发处理能力提升 **3 倍以上**。
+- **资源保护**: 
+  - 设置单任务解析超时时间为 **15 分钟**。
+  - 自动根据 CPU 核数动态调整进程数（上限 8）。
+  - 子进程任务完成后自动销毁，防止内存泄漏。
+- **详细日志**: 实时记录子进程 ID、每页解析状态及耗时，支持错误堆栈回溯。
 
 ## 项目结构
 
 ```
 backend/
 ├── app/                                    # 应用主目录
-│   ├── api/v1/                            # API路由层
-│   │   ├── __init__.py                    # 路由聚合器
-│   │   ├── auth.py                        # 认证接口
-│   │   ├── users.py                       # 用户管理
-│   │   ├── llms.py                        # LLM模型管理
-│   │   ├── apikeys.py                     # API密钥管理
-│   │   ├── knowledge.py                   # 知识库管理
-│   │   ├── documents.py                   # 文档管理
-│   │   ├── robots.py                      # 机器人管理
-│   │   └── chat.py                        # 对话问答
+│   ├── api/v1/                            # API路由层 (全异步)
+│   │   ├── ...                            # 各模块接口
 │   │
 │   ├── core/                              # 核心配置
-│   │   ├── config.py                      # 系统配置
-│   │   ├── security.py                    # 安全模块(JWT/AES)
-│   │   └── deps.py                        # 依赖注入
+│   │   ├── logger.py                      # 日志配置
 │   │
 │   ├── db/                                # 数据库
-│   │   ├── base.py                        # 模型基类
-│   │   └── session.py                     # 数据库会话
+│   │   ├── session.py                     # 异步数据库会话
+│   │
+│   ├── kafka/                             # Kafka 集成
+│   │   ├── producer.py                    # 消息生产者
+│   │   └── consumer.py                    # 消息消费者
 │   │
 │   ├── models/                            # SQLAlchemy数据模型
-│   │   ├── user.py                        # 用户模型
-│   │   ├── llm.py                         # LLM模型
-│   │   ├── apikey.py                      # API Key
-│   │   ├── knowledge.py                   # 知识库
-│   │   ├── document.py                    # 文档
-│   │   ├── robot.py                       # 机器人
-│   │   ├── robot_knowledge.py             # 机器人-知识库关联
-│   │   ├── session.py                     # 会话
-│   │   └── chat_history.py                # 聊天历史
 │   │
 │   ├── schemas/                           # Pydantic数据验证
-│   │   ├── user.py
-│   │   ├── llm.py
-│   │   ├── apikey.py
-│   │   ├── knowledge.py
-│   │   ├── document.py
-│   │   ├── robot.py
-│   │   └── chat.py
 │   │
-│   ├── services/                          # 业务逻辑层
-│   │   ├── auth_service.py                # 认证服务
-│   │   ├── user_service.py                # 用户服务
-│   │   ├── llm_service.py                 # LLM服务
-│   │   ├── apikey_service.py              # API Key服务
-│   │   ├── knowledge_service.py           # 知识库服务
-│   │   ├── document_service.py            # 文档服务
-│   │   ├── robot_service.py               # 机器人服务
-│   │   ├── rag_service.py                 # RAG核心服务
-│   │   ├── session_service.py             # 会话服务
-│   │   └── context_manager.py             # 上下文管理
+│   ├── services/                          # 业务逻辑层 (全异步)
+│   │   ├── rag_service.py                 # RAG核心服务(含重排序)
+│   │   ├── ...
 │   │
-│   ├── tasks/                             # Celery异步任务
-│   │   ├── __init__.py
-│   │   ├── celery_app.py                  # Celery配置
-│   │   └── document_tasks.py              # 文档处理任务
+│   ├── workers/                           # 独立工作进程 (Microservices)
+│   │   ├── parser.py                      # 文档解析服务
+│   │   ├── splitter.py                    # 文本切块服务
+│   │   └── vectorizer.py                  # 向量化服务
 │   │
 │   ├── utils/                             # 工具函数
-│   │   ├── embedding.py                   # 向量化工具
-│   │   ├── es_client.py                   # Elasticsearch客户端
-│   │   ├── file_parser.py                 # 文件解析
-│   │   ├── milvus_client.py               # Milvus客户端
-│   │   ├── redis_client.py                # Redis客户端
-│   │   ├── storage.py                     # 文件存储
-│   │   └── text_splitter.py               # 文本切片
+│   │   ├── reranker.py                    # 重排序模块
+│   │   ├── text_splitter.py               # 自研文本切分器
+│   │   ├── ...
 │   │
 │   └── main.py                            # FastAPI应用入口
 │
 ├── data/                                  # 数据目录
-│   └── cleaned_md/                        # 清理后的文档
-│
-├── models/                                # Embedding模型目录
-│   └── Qwen/Qwen3-Embedding-0___6B/
-│
-├── .env                                   # 环境变量
-├── .env.example                           # 环境配置模板
-├── pyproject.toml                         # 项目配置
-└── readme.md                              # 项目说明
+├── logs/                                  # 日志目录
+├── models/                                # Embedding/Rerank模型目录
+├── docker-compose.yaml                    # 容器编排 (含Kafka)
+└── requirements.txt                       # 依赖清单
 ```
 
-## API 接口文档
+## 日志配置
 
-### 1. 认证模块 `/api/v1/auth`
+系统使用 `loguru` 进行日志管理，支持控制台输出和文件轮转。
 
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/auth/register` | POST | 用户注册 |
-| `/api/v1/auth/login` | POST | 用户登录 |
-| `/api/v1/auth/me` | GET | 获取当前用户信息 |
-| `/api/v1/auth/refresh` | POST | 刷新Token |
+### 配置方式
 
-### 2. 用户管理 `/api/v1/users`
+日志配置位于 `app/core/logger.py`，默认配置如下：
 
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/users` | GET | 获取用户列表 |
-| `/api/v1/users` | POST | 创建用户 |
-| `/api/v1/users/{id}` | GET | 获取用户详情 |
-| `/api/v1/users/{id}` | PUT | 更新用户 |
-| `/api/v1/users/{id}` | DELETE | 删除用户 |
+- **日志目录**: `./logs`
+- **控制台输出**: 带颜色高亮，级别由 `LOG_LEVEL` 环境变量控制。
+- **文件输出**:
+  - `logs/rag_backend.log`: 记录 INFO 及以上级别日志，按天轮转（每天午夜），保留 30 天。
+  - `logs/rag_error.log`: 仅记录 ERROR 级别日志，按大小轮转（10MB），保留 30 天。
 
-### 3. LLM模型管理 `/api/v1/llms`
+### 查看日志
 
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/llms` | GET | 获取模型列表 |
-| `/api/v1/llms` | POST | 创建模型配置 |
-| `/api/v1/llms/{id}` | GET | 获取模型详情 |
-| `/api/v1/llms/{id}` | PUT | 更新模型配置 |
-| `/api/v1/llms/{id}` | DELETE | 删除模型配置 |
-
-### 4. API密钥管理 `/api/v1/apikeys`
-
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/apikeys` | GET | 获取密钥列表 |
-| `/api/v1/apikeys` | POST | 创建API密钥 |
-| `/api/v1/apikeys/{id}` | DELETE | 删除API密钥 |
-
-### 5. 知识库管理 `/api/v1/knowledge`
-
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/knowledge` | GET | 获取知识库列表 |
-| `/api/v1/knowledge` | POST | 创建知识库 |
-| `/api/v1/knowledge/{id}` | GET | 获取知识库详情 |
-| `/api/v1/knowledge/{id}` | PUT | 更新知识库 |
-| `/api/v1/knowledge/{id}` | DELETE | 删除知识库 |
-
-### 6. 文档管理 `/api/v1/documents`
-
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/documents` | GET | 获取文档列表 |
-| `/api/v1/documents` | POST | 上传文档 |
-| `/api/v1/documents/{id}` | GET | 获取文档详情 |
-| `/api/v1/documents/{id}` | DELETE | 删除文档 |
-| `/api/v1/documents/{id}/reprocess` | POST | 重新处理文档 |
-
-### 7. 机器人管理 `/api/v1/robots`
-
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/robots` | GET | 获取机器人列表 |
-| `/api/v1/robots` | POST | 创建机器人 |
-| `/api/v1/robots/{id}` | GET | 获取机器人详情 |
-| `/api/v1/robots/{id}` | PUT | 更新机器人 |
-| `/api/v1/robots/{id}` | DELETE | 删除机器人 |
-| `/api/v1/robots/{id}/knowledge` | GET | 获取机器人关联的知识库 |
-| `/api/v1/robots/{id}/knowledge` | POST | 关联知识库到机器人 |
-| `/api/v1/robots/{id}/knowledge/{kid}` | DELETE | 移除知识库关联 |
-
-### 8. 对话问答 `/api/v1/chat` (核心模块)
-
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/chat/ask` | POST | 对话问答(支持多轮对话) |
-| `/api/v1/chat/test` | POST | 测试知识库检索效果 |
-| `/api/v1/chat/sessions` | POST | 创建新会话 |
-| `/api/v1/chat/sessions` | GET | 获取会话列表 |
-| `/api/v1/chat/sessions/{id}` | GET | 获取会话详情 |
-| `/api/v1/chat/sessions/{id}` | PUT | 更新会话 |
-| `/api/v1/chat/sessions/{id}` | DELETE | 删除会话 |
-| `/api/v1/chat/history/{id}` | GET | 获取会话历史 |
-| `/api/v1/chat/feedback` | POST | 提交消息反馈 |
-
-### 9. 健康检查 `/api/v1/health`
-
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/health` | GET | 健康检查 |
-
-## 快速开始
-
-### 1. 环境准备
-
-**系统要求**：
-- Python 3.10 - 3.12
-- Docker 和 Docker Compose
-- Git
-
-### 2. 启动依赖服务
-
-使用 Docker Compose 启动 MySQL、Elasticsearch、Milvus、Redis 等服务：
+日志文件存储在 `backend/logs/` 目录下。
 
 ```bash
-docker-compose up -d
+# 查看实时日志
+tail -f logs/rag_backend.log
+
+# 查看错误日志
+cat logs/rag_error.log
 ```
 
-等待服务启动完成（约1-2分钟），可以通过以下命令检查服务状态：
+### 调整日志级别
 
-```bash
-docker-compose ps
+修改 `.env` 文件中的 `LOG_LEVEL` 配置项：
+
+```ini
+LOG_LEVEL=DEBUG  # 可选值: DEBUG, INFO, WARNING, ERROR
 ```
 
-### 3. 安装依赖
+## 1. 数据库架构设计
 
-```bash
-# 创建虚拟环境
-python -m venv .venv
+### 1.1 MySQL 关系型数据库 (ERD)
 
-# 激活虚拟环境
-# Windows
-.venv\Scripts\activate
-# Linux/macOS
-source .venv/bin/activate
+系统采用 MySQL 8.0 存储核心业务元数据。以下是完整的实体关系图（Mermaid 语法）：
 
-# 安装依赖
-pip install -r requirements.txt
+```mermaid
+erDiagram
+    rag_user ||--o{ rag_knowledge : "创建"
+    rag_user ||--o{ rag_robot : "创建"
+    rag_user ||--o{ rag_session : "发起"
+    rag_user ||--o{ rag_apikey : "管理"
+    
+    rag_llm ||--o{ rag_apikey : "对应"
+    rag_llm ||--o{ rag_knowledge : "向量化模型"
+    rag_llm ||--o{ rag_robot : "推理模型"
+    
+    rag_knowledge ||--o{ rag_document : "包含"
+    rag_knowledge ||--o{ rag_robot_knowledge : "关联"
+    
+    rag_robot ||--o{ rag_robot_knowledge : "使用"
+    rag_robot ||--o{ rag_session : "响应"
+    
+    rag_session ||--o{ rag_chat_history : "包含"
+
+    rag_user {
+        int id PK
+        string username "唯一, 索引"
+        string email "唯一, 索引"
+        string password_hash
+        string role "admin/user"
+        int status "1:启用, 0:禁用"
+        datetime created_at
+        datetime updated_at
+    }
+
+    rag_llm {
+        int id PK
+        string name "模型名称"
+        string provider "openai/minimax/siliconflow"
+        string type "llm/embedding"
+        string model_id "厂商ID"
+        string api_base "基础URL"
+        int status
+    }
+
+    rag_knowledge {
+        int id PK
+        int user_id FK
+        string name
+        string description
+        int embedding_llm_id FK
+        int chunk_size "切片大小"
+        int chunk_overlap "重叠度"
+        datetime created_at
+    }
+
+    rag_document {
+        int id PK
+        int knowledge_id FK
+        string file_name
+        string file_path
+        string status "parsing/splitting/embedding/completed/failed"
+        int char_count
+        datetime created_at
+    }
+
+    rag_robot {
+        int id PK
+        int user_id FK
+        int llm_id FK
+        string name
+        string prompt "系统提示词"
+        float temperature
+        int top_k
+        boolean enable_rerank "重排序开关"
+        datetime created_at
+    }
+
+    rag_session {
+        int id PK
+        int user_id FK
+        int robot_id FK
+        string title
+        datetime created_at
+    }
 ```
 
-### 4. 配置环境变量
+**初始化与迁移**:
+- **初始化脚本**: [sql/ddl.txt](file:///e:/LLM%20application/rag/backend/sql/ddl.txt)
+- **执行命令**:
+  ```bash
+  docker exec -i rag-mysql8 mysql -uroot -proot rag_system < sql/ddl.txt
+  ```
 
-复制环境配置模板并修改：
+### 1.2 ElasticSearch 全文检索
 
-```bash
-cp .env.example .env
+用于混合检索中的传统文本匹配，解决向量检索在关键词/缩略语上的不足。
+
+- **索引名称**: `rag_chunks`
+- **Mapping 定义**:
+  ```json
+  {
+    "mappings": {
+      "properties": {
+        "chunk_id": { "type": "keyword" },
+        "knowledge_id": { "type": "integer" },
+        "doc_id": { "type": "integer" },
+        "content": { 
+          "type": "text", 
+          "analyzer": "ik_max_word", 
+          "search_analyzer": "ik_smart" 
+        },
+        "metadata": { "type": "object", "enabled": false }
+      }
+    },
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    }
+  }
+  ```
+- **业务场景**: 在问答阶段，通过 `multi_match` 对 `content` 进行全文检索，并与 Milvus 的向量得分进行分权融合（Hybrid Search）。
+
+### 1.3 Milvus 向量数据库
+
+存储文本切片的 Embedding 向量，实现语义级别的相似度检索。
+
+- **Collection 名称**: `knowledge_base`
+- **字段模式 (Schema)**:
+  | 字段名 | 类型 | 描述 | 备注 |
+  | :--- | :--- | :--- | :--- |
+  | `id` | Int64 | 主键 | 自动增长 (AutoID: False) |
+  | `knowledge_id` | Int64 | 知识库 ID | 索引字段 |
+  | `doc_id` | Int64 | 文档 ID | 索引字段 |
+  | `vector` | FloatVector | 向量数据 | 维度由 Embedding 模型决定 (如 1024) |
+  | `content` | VarChar | 文本片段 | 长度限制 65535 |
+- **索引策略**: `IVF_FLAT` 或 `HNSW`，度量类型为 `IP` (内积) 或 `L2` (欧氏距离)。
+- **Python 创建示例**:
+  ```python
+  from pymilvus import Collection, SchemaField, DataType, CollectionSchema
+  fields = [
+      SchemaField(name="id", dtype=DataType.INT64, is_primary=True),
+      SchemaField(name="vector", dtype=DataType.FLOAT_VECTOR, dim=1024),
+      SchemaField(name="knowledge_id", dtype=DataType.INT64),
+      SchemaField(name="content", dtype=DataType.VARCHAR, max_length=65535)
+  ]
+  schema = CollectionSchema(fields)
+  collection = Collection("knowledge_base", schema)
+  ```
+
+---
+
+## 2. 核心业务流程
+
+### 2.1 登录认证时序图
+
+系统采用 JWT 无状态认证机制。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as 用户 (Frontend)
+    participant API as FastAPI Gateway
+    participant Auth as AuthService
+    participant DB as MySQL / Redis
+    
+    User->>API: POST /api/v1/auth/login {username, password}
+    API->>Auth: 验证凭证
+    Auth->>DB: 查询用户信息 (rag_user)
+    DB-->>Auth: 返回 Password Hash & Status
+    Auth->>Auth: bcrypt.verify(password, hash)
+    
+    alt 验证通过
+        Auth->>Auth: 生成 JWT (含 sub, role, exp)
+        Auth-->>API: 返回 Access Token
+        API-->>User: HTTP 200 {access_token, token_type: "bearer"}
+    else 凭证错误
+        Auth-->>API: 抛出 401 Unauthorized
+        API-->>User: HTTP 401 {detail: "用户名或密码错误"}
+    else 账号禁用
+        Auth-->>API: 抛出 403 Forbidden
+        API-->>User: HTTP 403 {detail: "账号已被禁用"}
+    end
 ```
 
-编辑 `.env` 文件，修改以下关键配置：
-- `JWT_SECRET_KEY`: 修改为随机字符串（至少32字符）
-- `AES_ENCRYPTION_KEY`: 修改为32字节随机字符串
-- 其他配置根据实际情况调整
+**策略说明**:
+- **加密算法**: `HS256` (JWT), `bcrypt` (密码哈希), `AES-256-GCM` (API Key 存储)。
+- **有效期**: 默认 24 小时，通过 `JWT_EXPIRE_HOURS` 配置。
+- **快速验证接口**:
+  ```bash
+  curl -X 'POST' 'http://localhost:8000/api/v1/auth/login' \
+    -H 'Content-Type: application/json' \
+    -d '{"username": "admin@example.com", "password": "Admin@123"}'
+  ```
 
-### 5. 初始化数据库
+---
 
-执行数据库 DDL 脚本：
-
-```bash
-# 方式1：使用MySQL客户端
-mysql -h localhost -u root -proot < sql/ddl.txt
-
-# 方式2：使用docker exec
-docker exec -i rag-mysql8 mysql -u root -proot < sql/ddl.txt
-```
+## 3. 运行环境与配置示例
 
 ### 6. 安装 Elasticsearch IK 分词器
 
@@ -307,20 +397,26 @@ docker restart rag-es7
 
 ### 7. 启动应用
 
-**启动 FastAPI 服务**：
+**步骤 1: 启动 FastAPI 主服务**
 
 ```bash
-# 开发模式（支持热重载）
+# 开发模式
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# 生产模式
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-**启动 Celery Worker**（新终端）：
+**步骤 2: 启动微服务 Workers** (需在独立终端运行)
+
+为了处理文档上传、解析和向量化，需要启动以下 Worker 进程：
 
 ```bash
-celery -A app.tasks.celery_app worker --loglevel=info -Q document_processing
+# 1. 启动文档解析服务
+python -m app.workers.parser
+
+# 2. 启动文本切分服务
+python -m app.workers.splitter
+
+# 3. 启动向量化服务
+python -m app.workers.vectorizer
 ```
 
 ### 8. 访问 API 文档
@@ -328,158 +424,60 @@ celery -A app.tasks.celery_app worker --loglevel=info -Q document_processing
 - **Swagger UI**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
 
-### 9. 测试接口
+## API 接口概览
 
-```bash
-curl http://localhost:8000/api/v1/health
-```
-
-## 核心功能
-
-### 用户认证与管理
-- 用户注册、登录（JWT认证）
-- 用户信息管理
-- 角色权限控制（Admin/User）
-
-### 知识库管理
-- 创建/查询/修改/删除知识库
-- 配置 Embedding 模型
-- 文档切片参数配置
-
-### 文档管理
-- 上传文档（PDF/DOCX/MD/HTML/TXT）
-- 异步文档解析与向量化
-- 文档状态跟踪
-- 文档删除与重新处理
-
-### 机器人配置
-- 创建/配置问答机器人
-- 关联知识库
-- 配置检索参数（top_k、相似度阈值）
-- 配置 Prompt 模板
-
-### RAG 问答服务
-- 混合检索（向量检索 + BM25关键词检索）
-- RRF 融合排序
-- 多轮对话上下文支持
-- 引用来源追踪
-
-### 会话管理
-- 用户会话创建/查询/更新/删除
-- 会话历史记录持久化
-- 会话置顶/归档功能
-- 用户反馈系统
-
-### 上下文管理
-- Redis 热数据缓存
-- 最多10轮对话上下文限制
-- 上下文自动过期清理
-- 会话锁防止并发冲突
-
-### LLM 模型管理
-- 配置多种 LLM 模型
-- API Key 加密存储
-- 模型类型区分（Chat/Embedding/Rerank）
+| 模块                | 描述     | 主要功能                               |
+| ------------------- | -------- | -------------------------------------- |
+| **Auth**      | 认证模块 | 注册、登录、Token刷新 (JWT)            |
+| **Users**     | 用户管理 | 用户增删改查、权限管理                 |
+| **Knowledge** | 知识库   | 知识库管理、Embedding配置              |
+| **Documents** | 文档管理 | 文档上传(触发Kafka流程)、状态查询      |
+| **Robots**    | 机器人   | 机器人配置(含重排序开关)、关联知识库   |
+| **Chat**      | 对话问答 | 混合检索、重排序、流式对话、上下文管理 |
+| **LLMs**      | 模型管理 | LLM/Embedding模型配置                  |
+| **APIKeys**   | 密钥管理 | 模型API Key管理                        |
 
 ## 数据库表结构
 
-| 表名 | 描述 |
-|------|------|
-| `rag_user` | 用户表 |
-| `rag_llm` | 大模型定义表 |
-| `rag_apikey` | API Key管理表 |
-| `rag_knowledge` | 知识库表 |
-| `rag_document` | 文档表 |
-| `rag_robot` | 问答机器人表 |
-| `rag_robot_knowledge` | 机器人-知识库关联表 |
-| `rag_session` | 用户会话表 |
-| `rag_chat_history` | 历史问答记录表 |
-
-## Redis 数据结构
-
-| Key模式 | 类型 | 描述 | TTL |
-|---------|------|------|-----|
-| `rag:session:{id}:context` | Hash | 会话上下文元数据 | 2小时 |
-| `rag:session:{id}:messages` | List | 对话历史消息 | 2小时 |
-| `rag:user:{id}:active_sessions` | Sorted Set | 用户活跃会话 | 24小时 |
-| `rag:session:{id}:lock` | String | 会话锁 | 30秒 |
+| 表名                    | 描述                                       |
+| ----------------------- | ------------------------------------------ |
+| `rag_user`            | 用户表                                     |
+| `rag_llm`             | 大模型定义表                               |
+| `rag_apikey`          | API Key管理表                              |
+| `rag_knowledge`       | 知识库表                                   |
+| `rag_document`        | 文档表                                     |
+| `rag_robot`           | 问答机器人表 (新增 `enable_rerank` 字段) |
+| `rag_robot_knowledge` | 机器人-知识库关联表                        |
+| `rag_session`         | 用户会话表                                 |
+| `rag_chat_history`    | 历史问答记录表                             |
 
 ## 常见问题
 
-### 1. Elasticsearch 连接失败
+### 1. Kafka 连接失败
 
-确保 Elasticsearch 服务已启动并安装 IK 分词器：
+确保 `docker-compose` 中的 `kafka` 和 `zookeeper` 服务已正常启动。检查 `.env` 中的 `KAFKA_BOOTSTRAP_SERVERS` 配置是否正确。
 
-```bash
-curl http://localhost:9200
-```
+### 2. 文档上传后一直处于"处理中"
 
-### 2. Milvus 集合创建失败
+请检查是否已启动了三个 Worker 进程 (`parser`, `splitter`, `vectorizer`)。文档处理流程完全依赖这些 Worker 消费 Kafka 消息。
 
-检查 Milvus 服务状态：
+### 3. 重排序模块报错
 
-```bash
-docker-compose logs milvus-standalone
-```
+重排序依赖 `sentence-transformers` 和相关模型权重。首次运行时会自动下载模型，请确保网络通畅，或手动下载模型到 `models/` 目录。
 
-### 3. Celery 任务执行失败
+### 4. SiliconFlow Embedding 400 错误排查
 
-查看 Celery Worker 日志：
+如果向量化过程中出现 `400 Bad Request`，请参考下表：
 
-```bash
-celery -A app.tasks.celery_app worker --loglevel=debug
-```
+| 错误信息 | 可能原因 | 解决办法 |
+| :--- | :--- | :--- |
+| `Invalid input: text too long` | 单段文本超过模型 Token 上限 | 减小切片大小 (`DEFAULT_CHUNK_SIZE`) |
+| `Model not found` | `rag_llm` 表中模型名称配置错误 | 检查 SiliconFlow 官方模型 ID |
+| `Empty input` | 切片后产生了空字符串 | 系统已增加自动过滤逻辑，请检查原文档内容 |
+| `Invalid API Key` | API Key 错误或已过期 | 在模型管理中更新有效的 API Key |
 
-### 4. 文档解析失败
-
-检查文件格式是否支持，查看错误日志中的详细信息。
-
-### 5. Redis 连接失败
-
-检查 Redis 服务状态：
-
-```bash
-docker-compose logs redis
-```
-
-## 部署
-
-### Docker 部署
-
-构建镜像：
-
-```bash
-docker build -t rag-backend:latest .
-```
-
-运行容器：
-
-```bash
-docker run -d \
-  --name rag-backend \
-  -p 8000:8000 \
-  --env-file .env \
-  rag-backend:latest
-```
-
-### 生产环境建议
-
-- 使用 Nginx 作为反向代理
-- 启用 HTTPS
-- 配置日志收集（ELK Stack）
-- 设置监控告警（Prometheus + Grafana）
-- 配置备份策略
+可以通过查看 `logs/vectorizer.log` 获取具体的 `TraceID` 并联系 SiliconFlow 技术支持。
 
 ## 许可证
 
 MIT License
-
-## 参与贡献
-
-欢迎提交 Issue 和 Pull Request！
-
----
-
-**更新日志**
-
-- 2026-01-11: 更新文档，添加完整API接口列表和项目架构

@@ -29,13 +29,26 @@ apiClient.interceptors.request.use(
   }
 );
 
+// 自定义错误类，包含状态码
+export class ApiError extends Error {
+  status: number;
+  data: any;
+
+  constructor(message: string, status: number, data?: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.data = data;
+  }
+}
+
 // 响应拦截器 - 处理错误
 apiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
     if (error.response) {
       const status = error.response.status;
-      const data = error.response.data as { detail?: string };
+      const data = error.response.data as { detail?: string; msg?: string };
       
       // 401 未授权 - 清除token并跳转到登录页
       if (status === 401) {
@@ -50,18 +63,18 @@ apiClient.interceptors.response.use(
       }
       
       // 提取错误信息
-      const errorMessage = data?.detail || getDefaultErrorMessage(status);
-      return Promise.reject(new Error(errorMessage));
+      const errorMessage = data?.msg || data?.detail || getDefaultErrorMessage(status);
+      return Promise.reject(new ApiError(errorMessage, status, data));
     }
     
     // 网络错误
     if (error.message === 'Network Error') {
-      return Promise.reject(new Error('网络连接失败，请检查网络'));
+      return Promise.reject(new ApiError('网络连接失败，请检查网络', 0));
     }
     
     // 超时
     if (error.code === 'ECONNABORTED') {
-      return Promise.reject(new Error('请求超时，请重试'));
+      return Promise.reject(new ApiError('请求超时，请重试', 408));
     }
     
     return Promise.reject(error);

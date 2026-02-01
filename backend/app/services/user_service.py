@@ -4,7 +4,9 @@
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy import func
 from fastapi import HTTPException, status
 
 from app.models.user import User
@@ -35,9 +37,10 @@ class UserService:
             )
 
     @staticmethod
-    def get_user_by_id(db: Session, user_id: int) -> User:
+    async def get_user_by_id(db: AsyncSession, user_id: int) -> User:
         """根据ID获取用户"""
-        user = db.query(User).filter(User.id == user_id).first()
+        result = await db.execute(select(User).filter(User.id == user_id))
+        user = result.scalars().first()
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -46,7 +49,7 @@ class UserService:
         return user
 
     @staticmethod
-    def get_user_detail(db: Session, user_id: int, current_user: User) -> User:
+    async def get_user_detail(db: AsyncSession, user_id: int, current_user: User) -> User:
         """
         获取用户详情（仅管理员可查看，且只能查看 user 级别用户）
         
@@ -64,7 +67,7 @@ class UserService:
         # 权限校验：只有管理员可以查看用户详情
         UserService._check_admin_permission(current_user)
         
-        user = UserService.get_user_by_id(db, user_id)
+        user = await UserService.get_user_by_id(db, user_id)
         
         # 只能查看 user 级别的用户，不能查看其他 admin
         if user.role == "admin":
@@ -76,8 +79,8 @@ class UserService:
         return user
 
     @staticmethod
-    def get_users(
-        db: Session,
+    async def get_users(
+        db: AsyncSession,
         current_user: User,
         skip: int = 0,
         limit: int = 20,
@@ -103,7 +106,7 @@ class UserService:
         UserService._check_admin_permission(current_user)
         
         # 只查询 role 为 user 的用户，不返回其他 admin
-        query = db.query(User).filter(User.role == "user")
+        query = select(User).filter(User.role == "user")
 
         # 关键词搜索
         if keyword:
@@ -112,8 +115,14 @@ class UserService:
                 (User.email.like(f"%{keyword}%"))
             )
 
-        total = query.count()
-        users = query.offset(skip).limit(limit).all()
+        # 获取总数
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar_one()
+
+        # 分页
+        result = await db.execute(query.offset(skip).limit(limit))
+        users = result.scalars().all()
 
         return UserListResponse(
             total=total,
@@ -121,7 +130,7 @@ class UserService:
         )
 
     @staticmethod
-    def update_user(db: Session, user_id: int, user_data: UserUpdate, current_user: User) -> User:
+    async def update_user(db: AsyncSession, user_id: int, user_data: UserUpdate, current_user: User) -> User:
         """
         更新用户信息（仅管理员可更新，且只能更新 user 级别用户）
         
@@ -140,7 +149,7 @@ class UserService:
         # 权限检查：只有管理员可以更新用户信息
         UserService._check_admin_permission(current_user)
 
-        user = UserService.get_user_by_id(db, user_id)
+        user = await UserService.get_user_by_id(db, user_id)
         
         # 只能更新 user 级别的用户，不能更新其他 admin
         if user.role == "admin":
@@ -152,10 +161,11 @@ class UserService:
         # 更新字段
         if user_data.email is not None:
             # 检查邮箱是否已被其他用户使用
-            existing = db.query(User).filter(
+            result = await db.execute(select(User).filter(
                 User.email == user_data.email,
                 User.id != user_id
-            ).first()
+            ))
+            existing = result.scalars().first()
             if existing:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -182,14 +192,14 @@ class UserService:
             user.status = user_data.status
 
         user.updated_at = datetime.now()
-        db.commit()
-        db.refresh(user)
+        await db.commit()
+        await db.refresh(user)
 
         logger.info(f"用户信息更新: {user.username} (ID: {user.id})")
         return user
 
     @staticmethod
-    def change_password(db: Session, current_user: User, password_data: PasswordChange) -> None:
+    async def change_password(db: AsyncSession, current_user: User, password_data: PasswordChange) -> None:
         """
         修改密码（用户只能修改自己的密码）
         
@@ -214,12 +224,12 @@ class UserService:
         current_user.password_hash = get_password_hash(password_data.new_password)
         current_user.password_changed_at = datetime.now(timezone.utc)
         current_user.updated_at = datetime.now()
-        db.commit()
+        await db.commit()
 
         logger.info(f"用户修改密码: {current_user.username} (ID: {current_user.id})")
 
     @staticmethod
-    def delete_user(db: Session, user_id: int, current_user: User) -> None:
+    async def delete_user(db: AsyncSession, user_id: int, current_user: User) -> None:
         """
         删除用户
         
@@ -251,7 +261,7 @@ class UserService:
                 detail="只有管理员可以删除用户"
             )
 
-        user = UserService.get_user_by_id(db, user_id)
+        user = await UserService.get_user_by_id(db, user_id)
 
         # admin 不能删除其他 admin
         if user.role == "admin":
@@ -260,13 +270,13 @@ class UserService:
                 detail="管理员之间不能相互删除"
             )
 
-        db.delete(user)
-        db.commit()
+        await db.delete(user)
+        await db.commit()
 
         logger.info(f"用户已删除: {user.username} (ID: {user.id})")
 
     @staticmethod
-    def reset_password(db: Session, user_id: int, current_user: User) -> str:
+    async def reset_password(db: AsyncSession, user_id: int, current_user: User) -> str:
         """
         重置用户密码（仅管理员可重置普通用户密码）
         
@@ -291,7 +301,7 @@ class UserService:
                 detail="只有管理员可以重置密码"
             )
 
-        user = UserService.get_user_by_id(db, user_id)
+        user = await UserService.get_user_by_id(db, user_id)
 
         # 只能重置 user 角色的密码，不能重置 admin 的密码
         if user.role == "admin":
@@ -308,16 +318,15 @@ class UserService:
             # 更新密码
             user.password_hash = get_password_hash(new_password)
             user.updated_at = datetime.now()
-            db.commit()
+            await db.commit()
 
             logger.info(f"管理员重置用户密码: {user.username} (ID: {user.id})")
             return "新的密码为:用户名_邮箱前缀"
         except Exception as e:
-            db.rollback()
+            await db.rollback()
             logger.error(f"重置密码失败: {str(e)}")
             return "修改失败"
 
 
 # 全局用户服务实例
 user_service = UserService()
-

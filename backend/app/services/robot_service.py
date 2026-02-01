@@ -1,10 +1,11 @@
 """
-机器人管理服务
+机器人管理服务 (异步)
 """
 import logging
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, delete, func
 from fastapi import HTTPException, status
 
 from app.models.user import User
@@ -21,23 +22,13 @@ class RobotService:
     """机器人管理服务类"""
 
     @staticmethod
-    def create_robot(db: Session, robot_data: RobotCreate, current_user: User) -> Robot:
-        """
-        创建机器人
-        
-        Args:
-            db: 数据库会话
-            robot_data: 机器人创建数据
-            current_user: 当前用户
-            
-        Returns:
-            Robot: 新创建的机器人对象
-        """
+    async def create_robot(db: AsyncSession, robot_data: RobotCreate, current_user: User) -> Robot:
+        """创建机器人"""
         # 验证Chat LLM模型是否存在
-        chat_llm = db.query(LLM).filter(
-            LLM.id == robot_data.chat_llm_id,
-            LLM.model_type == "chat"
-        ).first()
+        result = await db.execute(
+            select(LLM).where(LLM.id == robot_data.chat_llm_id, LLM.model_type == "chat")
+        )
+        chat_llm = result.scalar_one_or_none()
         if not chat_llm:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -46,7 +37,8 @@ class RobotService:
 
         # 验证知识库是否存在且有权限
         for kb_id in robot_data.knowledge_ids:
-            knowledge = db.query(Knowledge).filter(Knowledge.id == kb_id).first()
+            result = await db.execute(select(Knowledge).where(Knowledge.id == kb_id))
+            knowledge = result.scalar_one_or_none()
             if not knowledge:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -62,9 +54,13 @@ class RobotService:
         new_robot = Robot(
             user_id=current_user.id,
             name=robot_data.name,
+            avatar=robot_data.avatar,
             chat_llm_id=robot_data.chat_llm_id,
+            rerank_llm_id=robot_data.rerank_llm_id,
             system_prompt=robot_data.system_prompt,
+            welcome_msg=robot_data.welcome_message,
             top_k=robot_data.top_k,
+            enable_rerank=robot_data.enable_rerank if hasattr(robot_data, 'enable_rerank') else False,
             temperature=robot_data.temperature,
             max_tokens=robot_data.max_tokens,
             description=robot_data.description,
@@ -73,7 +69,7 @@ class RobotService:
             updated_at=datetime.now()
         )
         db.add(new_robot)
-        db.flush()  # 获取robot_id
+        await db.flush()  # 获取robot_id
 
         # 创建机器人-知识库关联
         for kb_id in robot_data.knowledge_ids:
@@ -83,16 +79,18 @@ class RobotService:
             )
             db.add(robot_kb)
 
-        db.commit()
-        db.refresh(new_robot)
+        await db.commit()
+        await db.refresh(new_robot)
 
         logger.info(f"创建机器人: {new_robot.name} (ID: {new_robot.id})")
         return new_robot
 
     @staticmethod
-    def get_robot_by_id(db: Session, robot_id: int, current_user: User) -> Robot:
+    async def get_robot_by_id(db: AsyncSession, robot_id: int, current_user: User) -> Robot:
         """获取机器人详情"""
-        robot = db.query(Robot).filter(Robot.id == robot_id).first()
+        result = await db.execute(select(Robot).where(Robot.id == robot_id))
+        robot = result.scalar_one_or_none()
+        
         if not robot:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -109,50 +107,52 @@ class RobotService:
         return robot
 
     @staticmethod
-    def get_robot_knowledge_ids(db: Session, robot_id: int) -> List[int]:
-        """获取机器人关联的知识库ID列表"""
-        robot_kbs = db.query(RobotKnowledge).filter(RobotKnowledge.robot_id == robot_id).all()
-        return [rk.knowledge_id for rk in robot_kbs]
+    async def get_robot_knowledge_ids(db: AsyncSession, robot_id: int) -> List[int]:
+        """获取机器人关联的有效知识库ID列表"""
+        # 只返回状态为启用的知识库ID
+        stmt = (
+            select(RobotKnowledge.knowledge_id)
+            .join(Knowledge, RobotKnowledge.knowledge_id == Knowledge.id)
+            .where(RobotKnowledge.robot_id == robot_id)
+            .where(Knowledge.status == 1)
+        )
+        result = await db.execute(stmt)
+        return result.scalars().all()
 
     @staticmethod
-    def get_robots(
-        db: Session,
+    async def get_robots(
+        db: AsyncSession,
         current_user: User,
         skip: int = 0,
         limit: int = 20,
         keyword: Optional[str] = None
     ) -> RobotListResponse:
-        """
-        获取机器人列表
-        
-        Args:
-            db: 数据库会话
-            current_user: 当前用户
-            skip: 跳过记录数
-            limit: 返回记录数
-            keyword: 搜索关键词
-            
-        Returns:
-            RobotListResponse: 机器人列表响应
-        """
-        query = db.query(Robot)
+        """获取机器人列表"""
+        query = select(Robot)
 
         # 非管理员只能查看自己的机器人
         if current_user.role != "admin":
-            query = query.filter(Robot.user_id == current_user.id)
+            query = query.where(Robot.user_id == current_user.id)
 
         # 关键词搜索
         if keyword:
-            query = query.filter(Robot.name.like(f"%{keyword}%"))
+            query = query.where(Robot.name.ilike(f"%{keyword}%"))
 
-        total = query.count()
-        robots = query.offset(skip).limit(limit).all()
+        # 计算总数
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar()
+
+        # 分页
+        query = query.offset(skip).limit(limit)
+        result = await db.execute(query)
+        robots = result.scalars().all()
 
         # 添加知识库ID列表
         items = []
         for robot in robots:
             robot_detail = RobotDetail.model_validate(robot)
-            robot_detail.knowledge_ids = RobotService.get_robot_knowledge_ids(db, robot.id)
+            robot_detail.knowledge_ids = await RobotService.get_robot_knowledge_ids(db, robot.id)
             items.append(robot_detail)
 
         return RobotListResponse(
@@ -161,25 +161,14 @@ class RobotService:
         )
 
     @staticmethod
-    def update_robot(
-        db: Session,
+    async def update_robot(
+        db: AsyncSession,
         robot_id: int,
         robot_data: RobotUpdate,
         current_user: User
     ) -> Robot:
-        """
-        更新机器人
-        
-        Args:
-            db: 数据库会话
-            robot_id: 机器人ID
-            robot_data: 更新数据
-            current_user: 当前用户
-            
-        Returns:
-            Robot: 更新后的机器人对象
-        """
-        robot = RobotService.get_robot_by_id(db, robot_id, current_user)
+        """更新机器人"""
+        robot = await RobotService.get_robot_by_id(db, robot_id, current_user)
 
         # 权限检查：只能修改自己的
         if robot.user_id != current_user.id and current_user.role != "admin":
@@ -191,12 +180,20 @@ class RobotService:
         # 更新字段
         if robot_data.name is not None:
             robot.name = robot_data.name
+        if robot_data.avatar is not None:
+            robot.avatar = robot_data.avatar
         if robot_data.chat_llm_id is not None:
             robot.chat_llm_id = robot_data.chat_llm_id
+        if robot_data.rerank_llm_id is not None:
+            robot.rerank_llm_id = robot_data.rerank_llm_id
         if robot_data.system_prompt is not None:
             robot.system_prompt = robot_data.system_prompt
+        if robot_data.welcome_message is not None:
+            robot.welcome_msg = robot_data.welcome_message
         if robot_data.top_k is not None:
             robot.top_k = robot_data.top_k
+        if robot_data.enable_rerank is not None:
+            robot.enable_rerank = robot_data.enable_rerank
         if robot_data.temperature is not None:
             robot.temperature = robot_data.temperature
         if robot_data.max_tokens is not None:
@@ -209,7 +206,7 @@ class RobotService:
         # 更新知识库关联
         if robot_data.knowledge_ids is not None:
             # 删除旧的关联
-            db.query(RobotKnowledge).filter(RobotKnowledge.robot_id == robot_id).delete()
+            await db.execute(delete(RobotKnowledge).where(RobotKnowledge.robot_id == robot_id))
             # 添加新的关联
             for kb_id in robot_data.knowledge_ids:
                 robot_kb = RobotKnowledge(
@@ -219,23 +216,16 @@ class RobotService:
                 db.add(robot_kb)
 
         robot.updated_at = datetime.now()
-        db.commit()
-        db.refresh(robot)
+        await db.commit()
+        await db.refresh(robot)
 
         logger.info(f"更新机器人: {robot.name} (ID: {robot.id})")
         return robot
 
     @staticmethod
-    def delete_robot(db: Session, robot_id: int, current_user: User) -> None:
-        """
-        删除机器人
-        
-        Args:
-            db: 数据库会话
-            robot_id: 机器人ID
-            current_user: 当前用户
-        """
-        robot = RobotService.get_robot_by_id(db, robot_id, current_user)
+    async def delete_robot(db: AsyncSession, robot_id: int, current_user: User) -> None:
+        """删除机器人"""
+        robot = await RobotService.get_robot_by_id(db, robot_id, current_user)
 
         # 权限检查
         if robot.user_id != current_user.id and current_user.role != "admin":
@@ -245,11 +235,11 @@ class RobotService:
             )
 
         # 删除关联的知识库记录
-        db.query(RobotKnowledge).filter(RobotKnowledge.robot_id == robot_id).delete()
+        await db.execute(delete(RobotKnowledge).where(RobotKnowledge.robot_id == robot_id))
 
         # 删除机器人记录
-        db.delete(robot)
-        db.commit()
+        await db.delete(robot)
+        await db.commit()
 
         logger.info(f"删除机器人: {robot.name} (ID: {robot.id})")
 

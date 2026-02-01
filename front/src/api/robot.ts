@@ -5,7 +5,9 @@ import type {
   RobotUpdate, 
   RobotListResponse,
   RobotBrief,
-  MessageResponse 
+  MessageResponse,
+  RetrievalTestRequest,
+  RetrievalTestResponse
 } from '@/types';
 
 /**
@@ -45,6 +47,12 @@ export const robotApi = {
   // 删除机器人
   delete: async (id: number): Promise<MessageResponse> => {
     const response = await apiClient.delete<MessageResponse>(`/robots/${id}`);
+    return response.data;
+  },
+
+  // 召回测试
+  retrievalTest: async (id: number, data: RetrievalTestRequest): Promise<RetrievalTestResponse> => {
+    const response = await apiClient.post<RetrievalTestResponse>(`/robots/${id}/retrieval-test`, data);
     return response.data;
   },
 };

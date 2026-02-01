@@ -18,6 +18,9 @@ class Document(Base):
     file_path = Column(String(500), nullable=False, comment="文件存储路径/OSS地址")
     file_extension = Column(String(20), nullable=False, comment="文件后缀")
     file_size = Column(BigInteger, default=0, comment="文件大小(字节)")
+    mime_type = Column(String(100), nullable=True, comment="文件MIME类型")
+    width = Column(Integer, nullable=True, comment="宽度(图片/视频)")
+    height = Column(Integer, nullable=True, comment="高度(图片/视频)")
     
     # 处理状态
     status = Column(String(20), default="uploading", comment="状态: uploading, parsing, embedding, completed, failed")

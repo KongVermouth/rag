@@ -1,15 +1,16 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, Search, Bot, Settings, Trash2, Edit2 } from 'lucide-react';
+import { Plus, Search, Bot, Settings, Trash2, Edit2, TestTube, ExternalLink } from 'lucide-react';
 import toast from 'react-hot-toast';
+import Link from 'next/link';
 import { Button, Input, Card, CardContent } from '@/components/ui';
 import { PageLoading, EmptyState } from '@/components/ui/loading';
 import { Modal, ConfirmModal } from '@/components/ui/modal';
 import { Select, Textarea } from '@/components/ui/form';
 import { formatDateTime } from '@/lib/utils';
 import { robotApi, knowledgeApi, llmApi } from '@/api';
-import type { Robot, RobotCreate, RobotUpdate, KnowledgeBrief, LLMBrief } from '@/types';
+import type { Robot, RobotCreate, RobotUpdate, KnowledgeBrief, LLMBrief, RetrievalTestRequest, RetrievalTestResultItem } from '@/types';
 
 export default function RobotsPage() {
   const [robots, setRobots] = useState<Robot[]>([]);
@@ -18,7 +19,6 @@ export default function RobotsPage() {
   
   // 弹窗状态
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [selectedRobot, setSelectedRobot] = useState<Robot | null>(null);
   
@@ -26,19 +26,19 @@ export default function RobotsPage() {
   const [formData, setFormData] = useState<RobotCreate>({
     name: '',
     chat_llm_id: 0,
+    rerank_llm_id: 0,
     knowledge_ids: [],
     system_prompt: '你是一个智能助手，请基于提供的知识库内容回答用户问题。',
     top_k: 5,
+    enable_rerank: false,
     temperature: 0.7,
     max_tokens: 2000,
     description: '',
   });
   const [chatModels, setChatModels] = useState<LLMBrief[]>([]);
+  const [rerankModels, setRerankModels] = useState<LLMBrief[]>([]);
   const [knowledges, setKnowledges] = useState<KnowledgeBrief[]>([]);
   const [formLoading, setFormLoading] = useState(false);
-  
-  // 编辑表单数据
-  const [editFormData, setEditFormData] = useState<RobotUpdate>({});
 
   useEffect(() => {
     loadRobots();
@@ -59,14 +59,19 @@ export default function RobotsPage() {
 
   const loadOptions = async () => {
     try {
-      const [models, kbs] = await Promise.all([
+      const [chatM, rerankM, kbs] = await Promise.all([
         llmApi.getOptions('chat'),
+        llmApi.getOptions('rerank'),
         knowledgeApi.getBriefList(),
       ]);
-      setChatModels(models);
+      setChatModels(chatM);
+      setRerankModels(rerankM);
       setKnowledges(kbs);
-      if (models.length > 0) {
-        setFormData(prev => ({ ...prev, chat_llm_id: models[0].id }));
+      if (chatM.length > 0) {
+        setFormData(prev => ({ ...prev, chat_llm_id: chatM[0].id }));
+      }
+      if (rerankM.length > 0) {
+        setFormData(prev => ({ ...prev, rerank_llm_id: rerankM[0].id }));
       }
     } catch (error) {
       console.error('加载选项失败', error);
@@ -124,67 +129,12 @@ export default function RobotsPage() {
     }
   };
 
-  const handleUpdate = async () => {
-    if (!selectedRobot) return;
-    
-    setFormLoading(true);
-    try {
-      await robotApi.update(selectedRobot.id, editFormData);
-      toast.success('机器人更新成功');
-      setShowEditModal(false);
-      setSelectedRobot(null);
-      loadRobots();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '更新失败';
-      toast.error(message);
-    } finally {
-      setFormLoading(false);
-    }
-  };
-
-  const resetForm = () => {
-    setFormData({
-      name: '',
-      chat_llm_id: chatModels[0]?.id || 0,
-      knowledge_ids: [],
-      system_prompt: '你是一个智能助手，请基于提供的知识库内容回答用户问题。',
-      top_k: 5,
-      temperature: 0.7,
-      max_tokens: 2000,
-      description: '',
-    });
-  };
-
-  const openEditModal = (robot: Robot) => {
-    setSelectedRobot(robot);
-    setEditFormData({
-      name: robot.name,
-      chat_llm_id: robot.chat_llm_id,
-      knowledge_ids: robot.knowledge_ids,
-      system_prompt: robot.system_prompt,
-      top_k: robot.top_k,
-      temperature: robot.temperature,
-      max_tokens: robot.max_tokens,
-      description: robot.description,
-    });
-    setShowEditModal(true);
-  };
-
   const toggleKnowledge = (id: number) => {
     setFormData(prev => ({
       ...prev,
       knowledge_ids: prev.knowledge_ids.includes(id)
         ? prev.knowledge_ids.filter(k => k !== id)
         : [...prev.knowledge_ids, id]
-    }));
-  };
-
-  const toggleEditKnowledge = (id: number) => {
-    setEditFormData(prev => ({
-      ...prev,
-      knowledge_ids: prev.knowledge_ids?.includes(id)
-        ? prev.knowledge_ids.filter(k => k !== id)
-        : [...(prev.knowledge_ids || []), id]
     }));
   };
 
@@ -257,13 +207,13 @@ export default function RobotsPage() {
                     </div>
                   </div>
                   <div className="flex items-center space-x-2">
-                    <button
-                      onClick={() => openEditModal(robot)}
+                    <Link
+                      href={`/robots/${robot.id}/edit-test`}
                       className="p-1.5 text-gray-400 hover:text-primary-600 transition-colors"
-                      title="编辑"
+                      title="编辑并测试"
                     >
-                      <Edit2 className="h-4 w-4" />
-                    </button>
+                      <ExternalLink className="h-4 w-4" />
+                    </Link>
                     <button
                       onClick={() => {
                         setSelectedRobot(robot);
@@ -317,6 +267,15 @@ export default function RobotsPage() {
             options={chatModels.map(m => ({ value: m.id, label: m.name }))}
           />
           
+          {formData.enable_rerank && (
+            <Select
+              label="重排序模型"
+              value={formData.rerank_llm_id}
+              onChange={(e) => setFormData({ ...formData, rerank_llm_id: parseInt(e.target.value) })}
+              options={rerankModels.map(m => ({ value: m.id, label: m.name }))}
+            />
+          )}
+          
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               关联知识库
@@ -353,6 +312,17 @@ export default function RobotsPage() {
               value={formData.top_k}
               onChange={(e) => setFormData({ ...formData, top_k: parseInt(e.target.value) || 5 })}
             />
+            <div className="flex flex-col justify-end pb-2">
+              <label className="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={formData.enable_rerank}
+                  onChange={(e) => setFormData({ ...formData, enable_rerank: e.target.checked })}
+                  className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">启用重排序</span>
+              </label>
+            </div>
             <Input
               label="温度"
               type="number"
@@ -382,95 +352,6 @@ export default function RobotsPage() {
             </Button>
             <Button onClick={handleCreate} loading={formLoading}>
               创建
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* 编辑机器人弹窗 */}
-      <Modal
-        isOpen={showEditModal}
-        onClose={() => setShowEditModal(false)}
-        title="编辑机器人"
-        size="lg"
-      >
-        <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
-          <Input
-            label="机器人名称"
-            value={editFormData.name || ''}
-            onChange={(e) => setEditFormData({ ...editFormData, name: e.target.value })}
-            placeholder="请输入机器人名称"
-          />
-          
-          <Select
-            label="对话模型"
-            value={editFormData.chat_llm_id || 0}
-            onChange={(e) => setEditFormData({ ...editFormData, chat_llm_id: parseInt(e.target.value) })}
-            options={chatModels.map(m => ({ value: m.id, label: m.name }))}
-          />
-          
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              关联知识库
-            </label>
-            <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-lg p-3">
-              {knowledges.map((kb) => (
-                <label key={kb.id} className="flex items-center space-x-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={editFormData.knowledge_ids?.includes(kb.id) || false}
-                    onChange={() => toggleEditKnowledge(kb.id)}
-                    className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                  />
-                  <span className="text-sm text-gray-700 dark:text-gray-300">{kb.name}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          
-          <Textarea
-            label="系统提示词"
-            value={editFormData.system_prompt || ''}
-            onChange={(e) => setEditFormData({ ...editFormData, system_prompt: e.target.value })}
-            rows={3}
-          />
-          
-          <div className="grid grid-cols-3 gap-4">
-            <Input
-              label="Top-K"
-              type="number"
-              value={editFormData.top_k || 5}
-              onChange={(e) => setEditFormData({ ...editFormData, top_k: parseInt(e.target.value) || 5 })}
-            />
-            <Input
-              label="温度"
-              type="number"
-              step="0.1"
-              value={editFormData.temperature || 0.7}
-              onChange={(e) => setEditFormData({ ...editFormData, temperature: parseFloat(e.target.value) || 0.7 })}
-            />
-            <Input
-              label="最大Token"
-              type="number"
-              value={editFormData.max_tokens || 2000}
-              onChange={(e) => setEditFormData({ ...editFormData, max_tokens: parseInt(e.target.value) || 2000 })}
-            />
-          </div>
-          
-          <Textarea
-            label="描述（可选）"
-            value={editFormData.description || ''}
-            onChange={(e) => setEditFormData({ ...editFormData, description: e.target.value })}
-            placeholder="请输入机器人描述"
-            rows={2}
-          />
-          
-          <div className="flex justify-end space-x-3 pt-4">
-            <Button variant="outline" onClick={() => setShowEditModal(false)}>
-              取消
-            </Button>
-            <Button onClick={handleUpdate} loading={formLoading}>
-              保存
             </Button>
           </div>
         </div>

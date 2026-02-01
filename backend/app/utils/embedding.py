@@ -2,15 +2,33 @@
 Embedding向量化工具 - 基于 src/batch_embedding.py
 """
 import logging
+import yaml
+import asyncio
+import time
 from pathlib import Path
-from typing import List, Union
+from typing import List, Union, Dict, Any, Optional
 import numpy as np
 from transformers import AutoTokenizer, AutoModel
 import torch
-
+import httpx
 from app.core.config import settings
+from app.core.exceptions import VectorizationFailedException
 
 logger = logging.getLogger(__name__)
+
+def load_siliconflow_config():
+    """加载 SiliconFlow 配置文件"""
+    config_path = Path("config/siliconflow.yml")
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f).get("embedding", {})
+        except Exception as e:
+            logger.error(f"加载 siliconflow.yml 失败: {e}")
+    return {}
+
+# 加载配置
+SF_CONFIG = load_siliconflow_config()
 
 
 class EmbeddingModel:

@@ -12,12 +12,12 @@ class LLMCreate(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     
     name: str = Field(..., min_length=1, max_length=100, description="模型名称")
-    model_type: str = Field(..., description="模型类型：embedding/chat")
+    model_type: str = Field(..., description="模型类型：embedding/chat/rerank")
     provider: str = Field(..., max_length=50, description="提供商：local/openai/azure等")
     model_name: str = Field(..., max_length=100, description="模型标识")
     base_url: Optional[str] = Field(None, max_length=255, description="API基础URL")
     api_version: Optional[str] = Field(None, max_length=50, description="API版本")
-    description: Optional[str] = Field(None, max_length=500, description="模型描述")
+    description: Optional[str] = Field(None, max_length=1000, description="模型描述")
 
 
 # ==================== LLM信息 ====================
@@ -26,7 +26,7 @@ class LLMBase(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     
     name: str = Field(..., description="模型名称")
-    model_type: str = Field(..., description="模型类型：embedding/chat")
+    model_type: str = Field(..., description="模型类型：embedding/chat/rerank")
     provider: str = Field(..., description="提供商")
     model_name: str = Field(..., description="模型标识")
     base_url: Optional[str] = Field(None, description="API基础URL")
@@ -50,7 +50,7 @@ class LLMUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100, description="模型名称")
     base_url: Optional[str] = Field(None, max_length=255, description="API基础URL")
     api_version: Optional[str] = Field(None, max_length=50, description="API版本")
-    description: Optional[str] = Field(None, max_length=500, description="模型描述")
+    description: Optional[str] = Field(None, max_length=1000, description="模型描述")
     status: Optional[int] = Field(None, description="状态：0-禁用，1-启用")
 
 

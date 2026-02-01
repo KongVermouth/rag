@@ -4,7 +4,9 @@ LLM模型管理服务
 import logging
 from datetime import datetime
 from typing import Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy import func
 from fastapi import HTTPException, status
 
 from app.models.user import User
@@ -35,7 +37,7 @@ class LLMService:
             )
 
     @staticmethod
-    def create_llm(db: Session, llm_data: LLMCreate, current_user: User) -> LLM:
+    async def create_llm(db: AsyncSession, llm_data: LLMCreate, current_user: User) -> LLM:
         """
         创建LLM模型（仅管理员）
         
@@ -66,14 +68,14 @@ class LLMService:
             updated_at=datetime.now()
         )
         db.add(new_llm)
-        db.commit()
-        db.refresh(new_llm)
+        await db.commit()
+        await db.refresh(new_llm)
 
         logger.info(f"创建LLM模型: {new_llm.name} (ID: {new_llm.id})")
         return new_llm
 
     @staticmethod
-    def get_llm_by_id(db: Session, llm_id: int, current_user: User) -> LLM:
+    async def get_llm_by_id(db: AsyncSession, llm_id: int, current_user: User) -> LLM:
         """
         获取LLM模型详情（仅管理员）
         
@@ -91,7 +93,8 @@ class LLMService:
         # 权限校验：只有管理员可以查看
         LLMService._check_admin_permission(current_user)
         
-        llm = db.query(LLM).filter(LLM.id == llm_id).first()
+        result = await db.execute(select(LLM).filter(LLM.id == llm_id))
+        llm = result.scalars().first()
         if not llm:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -101,8 +104,8 @@ class LLMService:
         return llm
 
     @staticmethod
-    def get_llms(
-        db: Session,
+    async def get_llms(
+        db: AsyncSession,
         current_user: User,
         skip: int = 0,
         limit: int = 20,
@@ -116,7 +119,7 @@ class LLMService:
             current_user: 当前用户（必须是管理员）
             skip: 跳过记录数
             limit: 返回记录数
-            model_type: 模型类型过滤（embedding/chat）
+            model_type: 模型类型过滤（embedding/chat/rerank）
             
         Returns:
             LLMListResponse: LLM列表响应
@@ -127,14 +130,20 @@ class LLMService:
         # 权限校验：只有管理员可以查看列表
         LLMService._check_admin_permission(current_user)
         
-        query = db.query(LLM)
+        query = select(LLM)
 
         # 模型类型过滤
         if model_type:
             query = query.filter(LLM.model_type == model_type)
 
-        total = query.count()
-        llms = query.offset(skip).limit(limit).all()
+        # 获取总数
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar_one()
+
+        # 分页
+        result = await db.execute(query.offset(skip).limit(limit))
+        llms = result.scalars().all()
 
         return LLMListResponse(
             total=total,
@@ -142,7 +151,7 @@ class LLMService:
         )
 
     @staticmethod
-    def update_llm(db: Session, llm_id: int, llm_data: LLMUpdate, current_user: User) -> LLM:
+    async def update_llm(db: AsyncSession, llm_id: int, llm_data: LLMUpdate, current_user: User) -> LLM:
         """
         更新LLM模型（仅管理员）
         
@@ -159,7 +168,7 @@ class LLMService:
             HTTPException: 403 权限不足
         """
         # 权限校验：只有管理员可以更新（get_llm_by_id 内部会校验）
-        llm = LLMService.get_llm_by_id(db, llm_id, current_user)
+        llm = await LLMService.get_llm_by_id(db, llm_id, current_user)
 
         # 更新字段
         if llm_data.name is not None:
@@ -174,14 +183,14 @@ class LLMService:
             llm.status = llm_data.status
 
         llm.updated_at = datetime.now()
-        db.commit()
-        db.refresh(llm)
+        await db.commit()
+        await db.refresh(llm)
 
         logger.info(f"更新LLM模型: {llm.name} (ID: {llm.id})")
         return llm
 
     @staticmethod
-    def delete_llm(db: Session, llm_id: int, current_user: User) -> None:
+    async def delete_llm(db: AsyncSession, llm_id: int, current_user: User) -> None:
         """
         删除LLM模型（仅管理员）
         
@@ -194,21 +203,21 @@ class LLMService:
             HTTPException: 403 权限不足
         """
         # 权限校验：只有管理员可以删除（get_llm_by_id 内部会校验）
-        llm = LLMService.get_llm_by_id(db, llm_id, current_user)
+        llm = await LLMService.get_llm_by_id(db, llm_id, current_user)
 
         # 检查是否有关联的知识库或机器人正在使用
         # TODO: 添加关联检查
 
-        db.delete(llm)
-        db.commit()
+        await db.delete(llm)
+        await db.commit()
 
         logger.info(f"删除LLM模型: {llm.name} (ID: {llm.id})")
 
     # ==================== 普通用户只读操作 ====================
     
     @staticmethod
-    def get_available_llm_options(
-        db: Session,
+    async def get_available_llm_options(
+        db: AsyncSession,
         model_type: Optional[str] = None
     ) -> list[LLMDetail]:
         """
@@ -218,17 +227,18 @@ class LLMService:
         
         Args:
             db: 数据库会话
-            model_type: 模型类型过滤（embedding/chat）
+            model_type: 模型类型过滤（embedding/chat/rerank）
             
         Returns:
             list[LLMDetail]: 可用的LLM模型列表
         """
-        query = db.query(LLM).filter(LLM.status == 1)
+        query = select(LLM).filter(LLM.status == 1)
         
         if model_type:
             query = query.filter(LLM.model_type == model_type)
         
-        llms = query.all()
+        result = await db.execute(query)
+        llms = result.scalars().all()
         return [LLMDetail.model_validate(llm) for llm in llms]
 
 

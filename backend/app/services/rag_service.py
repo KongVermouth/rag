@@ -1,23 +1,29 @@
 """
-RAG服务 - 检索增强生成
+RAG服务 - 检索增强生成 (异步)
 """
+import os
 import logging
 import time
 import uuid
 import httpx
-from typing import List, Dict, Any, Optional, Generator
-from sqlalchemy.orm import Session
+import asyncio
+from typing import List, Dict, Any, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.models.robot import Robot
 from app.models.knowledge import Knowledge
 from app.models.llm import LLM
 from app.models.apikey import APIKey
 from app.schemas.chat import ChatRequest, ChatResponse, RetrievedContext
-from app.utils.es_client import ESClient
-from app.utils.milvus_client import MilvusClient
+from app.utils.es_client import es_client
+from app.utils.milvus_client import milvus_client
 from app.utils.embedding import get_embedding_model
+from app.utils.reranker import reranker
 from app.services.context_manager import context_manager
-from app.core.security import api_key_crypto
+from app.utils.redis_client import redis_client
+from app.core.llm.factory import LLMFactory
+from app.core.llm.base import LLMRequest, LLMMessage
 
 logger = logging.getLogger(__name__)
 
@@ -26,97 +32,232 @@ class RAGService:
     """RAG服务类 - 负责检索增强生成"""
 
     def __init__(self):
-        self.es_client = ESClient()
-        self.milvus_client = MilvusClient()
+        self.es_client = es_client
+        self.milvus_client = milvus_client
 
-    def hybrid_retrieve(
+    async def hybrid_retrieve(
         self,
-        db: Session,
+        db: AsyncSession,
         robot: Robot,
         knowledge_ids: List[int],
         query: str,
         top_k: int = 5
     ) -> List[RetrievedContext]:
         """
-        混合检索：向量检索 + 关键词检索
-        
-        Args:
-            db: 数据库会话
-            robot: 机器人对象
-            knowledge_ids: 知识库ID列表
-            query: 查询文本
-            top_k: 返回Top-K结果
-            
-        Returns:
-            List[RetrievedContext]: 检索到的上下文列表
+        混合检索核心逻辑：
+        1. 根据是否启用重排序(Rerank)确定初始召回数量 recall_k。
+        2. 并行执行向量检索(Vector Search)和关键词检索(BM25)。
+        3. 使用倒数排名融合算法(RRF)对两路检索结果进行初步融合。
+        4. 如果启用了重排序，则对融合后的结果调用精排模型进行二次排序。
+        5. 返回最终最相关的 top_k 个片段。
         """
-        # 1. 向量检索
-        vector_results = self._vector_retrieve(db, knowledge_ids, query, top_k)
+        # 初始召回范围：如果启用了重排序，召回数量扩大 (例如 4 倍) 以保证精排的效果
+        recall_k = top_k * 4 if robot.enable_rerank else top_k
 
-        # 2. 关键词检索
-        keyword_results = self._keyword_retrieve(knowledge_ids, query, top_k)
+        # 1. 向量检索 (语义相似度)
+        vector_results = await self._vector_retrieve_async(
+            db, knowledge_ids, query, recall_k
+        )
 
-        # 3. 混合融合（简单合并，根据分数排序）
-        merged_results = self._merge_results(vector_results, keyword_results, top_k)
+        # 2. 关键词检索 (BM25 匹配)
+        keyword_results = await self._keyword_retrieve_async(
+            knowledge_ids, query, recall_k
+        )
 
-        return merged_results
+        # 3. 混合融合 (RRF 算法)
+        merged_results = await self._merge_results_async(vector_results, keyword_results, recall_k)
 
-    def _vector_retrieve(
-        self,
-        db: Session,
-        knowledge_ids: List[int],
-        query: str,
-        top_k: int
-    ) -> List[Dict[str, Any]]:
-        """向量检索"""
-        # 获取查询向量
-        embedding_model = get_embedding_model()
-        query_vector = embedding_model.encode(query)[0].tolist()
-
-        all_results = []
-
-        # 对每个知识库进行检索
-        for kb_id in knowledge_ids:
-            knowledge = db.query(Knowledge).filter(Knowledge.id == kb_id).first()
-            if not knowledge:
-                continue
-
-            try:
-                # 在Milvus中检索
-                results = self.milvus_client.search_vectors(
-                    collection_name=knowledge.vector_collection_name,
-                    query_vector=query_vector,
-                    top_k=top_k
+        # 4. 重排序 (精排逻辑)
+        if robot.enable_rerank and merged_results:
+            docs = [ctx.content for ctx in merged_results]
+            
+            # 检查是否有配置远程重排序模型
+            rerank_llm = None
+            if robot.rerank_llm_id:
+                l_stmt = select(LLM).where(LLM.id == robot.rerank_llm_id)
+                l_result = await db.execute(l_stmt)
+                rerank_llm = l_result.scalar_one_or_none()
+            
+            if rerank_llm and rerank_llm.base_url:
+                # 使用远程重排序 API
+                logger.info(f"使用远程重排序模型: {rerank_llm.model_name}")
+                # 获取 API Key
+                ak_stmt = select(APIKey).where(APIKey.llm_id == rerank_llm.id, APIKey.status == 1)
+                ak_result = await db.execute(ak_stmt)
+                apikey = ak_result.scalar_one_or_none()
+                api_key = api_key_crypto.decrypt(apikey.api_key_encrypted) if apikey else ""
+                
+                provider = LLMFactory.get_provider(
+                    provider_name=rerank_llm.provider,
+                    api_key=api_key,
+                    base_url=rerank_llm.base_url,
+                    api_version=rerank_llm.api_version
                 )
+                
+                rerank_results = await provider.rerank(
+                    query=query,
+                    texts=docs,
+                    model=rerank_llm.model_name,
+                    top_n=top_k
+                )
+                
+                final_results = []
+                for i, res in enumerate(rerank_results):
+                    if isinstance(res, dict):
+                        idx = res.get("index", i)
+                        score = res.get("relevance_score", res.get("score", 0))
+                    else:
+                        idx = i
+                        score = 0
+                        
+                    if idx < len(merged_results):
+                        ctx = merged_results[idx]
+                        ctx.score = float(score)
+                        ctx.source = f"{ctx.source}+remote_rerank"
+                        final_results.append(ctx)
+                return final_results
+            else:
+                # 使用本地重排序模型 (BGE-Reranker 等)
+                logger.info("使用本地重排序模型")
+                loop = asyncio.get_running_loop()
+                # rerank 是同步耗时操作，需在线程池执行
+                sorted_indices_scores = await loop.run_in_executor(
+                    None,
+                    reranker.rerank,
+                    query, docs, top_k
+                )
+                
+                final_results = []
+                for idx, score in sorted_indices_scores:
+                    if idx < len(merged_results):
+                        ctx = merged_results[idx]
+                        ctx.score = float(score)  # 使用精排分数更新
+                        ctx.source = f"{ctx.source}+local_rerank"
+                        final_results.append(ctx)
+                return final_results
 
-                for result in results:
-                    all_results.append({
-                        "chunk_id": result["chunk_id"],
-                        "document_id": result["document_id"],
-                        "score": result["score"],
-                        "source": "vector",
-                        "knowledge_id": kb_id
-                    })
-            except Exception as e:
-                logger.error(f"向量检索失败 (KB: {kb_id}): {e}")
-                continue
+        return merged_results[:top_k]
 
-        # 按分数排序
-        all_results.sort(key=lambda x: x["score"], reverse=True)
-        return all_results[:top_k]
+    async def _vector_retrieve_async(
+        self,
+        db: AsyncSession,
+        knowledge_ids: List[int],
+        query: str,
+        top_k: int = 5
+    ) -> List[Dict[str, Any]]:
+        """异步向量检索 (支持多知识库和不同Embedding模型)"""
+        try:
+            # 1. 获取所有知识库配置
+            k_stmt = select(Knowledge).where(Knowledge.id.in_(knowledge_ids))
+            k_result = await db.execute(k_stmt)
+            knowledges = k_result.scalars().all()
+            
+            if not knowledges:
+                return []
 
-    def _keyword_retrieve(
+            # 2. 按 Embedding 模型分组知识库
+            # {embed_llm_id: [knowledge1, knowledge2, ...]}
+            model_groups = {}
+            for kb in knowledges:
+                mid = kb.embed_llm_id or 0  # 0 表示本地模型
+                if mid not in model_groups:
+                    model_groups[mid] = []
+                model_groups[mid].append(kb)
+
+            # 3. 对每个模型分组执行检索
+            all_results = []
+            
+            for mid, group_kbs in model_groups.items():
+                # 3.1 生成该模型的查询向量
+                query_vector = None
+                if mid == 0:
+                    # 本地模型
+                    logger.info("使用本地Embedding模型进行检索")
+                    embedding_model = get_embedding_model()
+                    # encode returns (1, dim) ndarray
+                    query_vector = embedding_model.encode(query)[0].tolist()
+                else:
+                    # 获取远程模型配置
+                    llm_stmt = select(LLM).where(LLM.id == mid)
+                    llm_result = await db.execute(llm_stmt)
+                    llm = llm_result.scalar_one_or_none()
+                    
+                    if llm and llm.base_url:
+                        logger.info(f"使用远程Embedding模型: {llm.model_name} (ID: {mid})")
+                        # 获取 API Key
+                        ak_stmt = select(APIKey).where(APIKey.llm_id == llm.id, APIKey.status == 1)
+                        ak_result = await db.execute(ak_stmt)
+                        apikey = ak_result.scalar_one_or_none()
+                        api_key = api_key_crypto.decrypt(apikey.api_key_encrypted) if apikey else ""
+                        
+                        provider = LLMFactory.get_provider(
+                            provider_name=llm.provider,
+                            api_key=api_key,
+                            base_url=llm.base_url,
+                            api_version=llm.api_version
+                        )
+                        
+                        embeddings = await provider.embed(
+                            texts=[query],
+                            model=llm.model_name
+                        )
+                        query_vector = embeddings[0]
+                    else:
+                        # 回退到本地模型
+                        logger.warning(f"远程模型 {mid} 配置无效，回退到本地模型")
+                        embedding_model = get_embedding_model()
+                        query_vector = embedding_model.encode(query)[0].tolist()
+
+                if query_vector is None:
+                    continue
+
+                # 3.2 并发搜索该分组下的所有 Milvus 集合
+                search_tasks = []
+                for kb in group_kbs:
+                    search_tasks.append(
+                        self.milvus_client.search_vectors(
+                            collection_name=kb.vector_collection_name,
+                            query_vector=query_vector,
+                            top_k=top_k
+                        )
+                    )
+                
+                task_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+                
+                for i, res in enumerate(task_results):
+                    if isinstance(res, Exception):
+                        logger.error(f"知识库 {group_kbs[i].id} 向量检索失败: {res}")
+                        continue
+                    
+                    for item in res:
+                        all_results.append({
+                            "chunk_id": item["chunk_id"],
+                            "document_id": item["document_id"],
+                            "score": item["score"],
+                            "source": "vector",
+                            "knowledge_id": group_kbs[i].id
+                        })
+            
+            # 4. 按分数全局排序并取 top_k
+            all_results.sort(key=lambda x: x["score"], reverse=True)
+            return all_results[:top_k]
+            
+        except Exception as e:
+            logger.error(f"异步向量检索失败: {str(e)}")
+            return []
+
+    async def _keyword_retrieve_async(
         self,
         knowledge_ids: List[int],
         query: str,
         top_k: int
     ) -> List[Dict[str, Any]]:
-        """关键词检索（BM25）"""
+        """关键词检索 (Async)"""
         try:
-            results = self.es_client.search_chunks(
-                query=query,
-                knowledge_ids=knowledge_ids,
-                top_k=top_k
+            results = await self.es_client.search_chunks(
+                query,
+                knowledge_ids,
+                top_k
             )
 
             return [{
@@ -130,20 +271,23 @@ class RAGService:
             logger.error(f"关键词检索失败: {e}")
             return []
 
-    def _merge_results(
+    async def _merge_results_async(
         self,
         vector_results: List[Dict[str, Any]],
         keyword_results: List[Dict[str, Any]],
         top_k: int
     ) -> List[RetrievedContext]:
         """
-        合并检索结果
-        使用RRF（Reciprocal Rank Fusion）算法
+        合并检索结果 (RRF - Reciprocal Rank Fusion)
+        
+        RRF 算法逻辑：
+        对于每个召回的文档，其最终分数 = Σ (1 / (k + rank))
+        其中 k 是一个常量 (通常取 60)，rank 是该文档在某路检索结果中的排名。
+        这种方法不需要对不同维度的分数进行归一化，能有效平衡语义搜索和关键词搜索。
         """
-        # 使用chunk_id去重并计算融合分数
         merged_scores = {}
 
-        # 向量检索结果
+        # 处理向量检索结果 (语义召回)
         for rank, result in enumerate(vector_results):
             chunk_id = result["chunk_id"]
             if chunk_id not in merged_scores:
@@ -156,10 +300,9 @@ class RAGService:
                     "rrf_score": 0,
                     "source": "vector"
                 }
-            # RRF公式: 1 / (k + rank)，k通常取60
             merged_scores[chunk_id]["rrf_score"] += 1 / (60 + rank + 1)
 
-        # 关键词检索结果
+        # 处理关键词检索结果 (BM25 召回)
         for rank, result in enumerate(keyword_results):
             chunk_id = result["chunk_id"]
             if chunk_id not in merged_scores:
@@ -173,544 +316,142 @@ class RAGService:
                     "source": "keyword"
                 }
             else:
+                # 如果两路都召回了，标记为 hybrid
                 merged_scores[chunk_id]["keyword_score"] = result["score"]
                 merged_scores[chunk_id]["source"] = "hybrid"
 
             merged_scores[chunk_id]["rrf_score"] += 1 / (60 + rank + 1)
 
-        # 按RRF分数排序
-        sorted_results = sorted(
+        # 按 RRF 最终得分从高到低排序
+        sorted_items = sorted(
             merged_scores.values(),
             key=lambda x: x["rrf_score"],
             reverse=True
         )[:top_k]
 
-        # 获取文档内容（从ES获取）
-        contexts = []
-        for result in sorted_results:
-            try:
-                chunk_data = self.es_client.get_chunk_by_id(result["chunk_id"])
-                if chunk_data:
+        if not sorted_items:
+            return []
+
+        # 批量从 Elasticsearch 获取完整的文本内容 (Context)
+        chunk_ids = [item["chunk_id"] for item in sorted_items]
+        try:
+            # 使用 mget 批量查询，比循环单个查询更高效
+            chunks_data_list = await self.es_client.get_chunks_by_ids(chunk_ids)
+            # 建立 ID 到数据的映射以保持排序顺序
+            chunk_map = {c["chunk_id"]: c for c in chunks_data_list}
+            
+            contexts = []
+            for item in sorted_items:
+                cid = item["chunk_id"]
+                if cid in chunk_map:
+                    c_data = chunk_map[cid]
                     contexts.append(RetrievedContext(
-                        chunk_id=result["chunk_id"],
-                        document_id=result["document_id"],
-                        filename=chunk_data.get("filename", "unknown"),
-                        content=chunk_data.get("content", ""),
-                        score=result["rrf_score"],
-                        source=result["source"]
+                        chunk_id=cid,
+                        document_id=item["document_id"],
+                        filename=c_data.get("filename", "unknown"),
+                        content=c_data.get("content", ""),
+                        score=item["rrf_score"],
+                        source=item["source"]
                     ))
-            except Exception as e:
-                logger.error(f"获取chunk内容失败: {e}")
-                continue
+            return contexts
+        except Exception as e:
+            logger.error(f"批量获取检索内容失败: {e}")
+            return []
 
-        return contexts
-
-    def _call_llm_api(
+    async def _call_llm_api(
         self,
-        db: Session,
+        db: AsyncSession,
         llm_id: int,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: int = 2000
     ) -> Dict[str, Any]:
-        """
-        调用LLM API生成回答
-        
-        Args:
-            db: 数据库会话
-            llm_id: LLM模型ID
-            messages: 消息列表
-            temperature: 生成温度
-            max_tokens: 最大Token数
-            
-        Returns:
-            Dict: 包含 answer 和 token_usage
-        """
-        # 1. 获取LLM配置
-        llm = db.query(LLM).filter(LLM.id == llm_id, LLM.status == 1).first()
+        """调用LLM API生成回答 (使用统一抽象层)"""
+        result = await db.execute(select(LLM).where(LLM.id == llm_id, LLM.status == 1))
+        llm = result.scalar_one_or_none()
         if not llm:
             raise ValueError(f"LLM模型不存在或已禁用: {llm_id}")
         
-        # 2. 获取可用的API Key
-        apikey = db.query(APIKey).filter(
-            APIKey.llm_id == llm_id,
-            APIKey.status == 1
-        ).first()
+        result = await db.execute(select(APIKey).where(APIKey.llm_id == llm_id, APIKey.status == 1))
+        apikey = result.scalar_one_or_none()
         if not apikey:
             raise ValueError(f"LLM {llm.name} 没有可用的API Key")
         
-        # 解密API Key
+        from app.core.security import api_key_crypto
         api_key = api_key_crypto.decrypt(apikey.api_key_encrypted)
         
-        # 3. 根据 provider 调用不同的API
-        provider = llm.provider.lower()
+        provider = LLMFactory.get_provider(
+            provider_name=llm.provider,
+            api_key=api_key,
+            base_url=llm.base_url,
+            api_version=llm.api_version
+        )
         
-        if provider in ["openai", "qwen", "deepseek", "siliconflow", "minimax", "moonshot", "zhipu", "baichuan", "yi", "doubao"]:
-            return self._call_openai_compatible(
-                base_url=llm.base_url or "https://api.openai.com/v1",
-                api_key=api_key,
-                model=llm.model_name,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-        elif provider == "azure":
-            return self._call_azure_openai(
-                base_url=llm.base_url,
-                api_key=api_key,
-                model=llm.model_name,
-                api_version=llm.api_version or "2024-02-15-preview",
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-        elif provider == "anthropic":
-            return self._call_anthropic(
-                api_key=api_key,
-                model=llm.model_name,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-        else:
-            raise ValueError(f"不支持的LLM提供商: {provider}")
-    
-    def _call_openai_compatible(
-        self,
-        base_url: str,
-        api_key: str,
-        model: str,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        max_tokens: int,
-        max_retries: int = 3
-    ) -> Dict[str, Any]:
-        """调用OpenAI兼容的API（带重试机制）"""
-        url = f"{base_url.rstrip('/')}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
+        request = LLMRequest(
+            messages=[LLMMessage(role=m["role"], content=m["content"]) for m in messages],
+            model=llm.model_name,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
         
-        last_error = None
-        
-        for attempt in range(max_retries):
-            try:
-                with httpx.Client(timeout=120.0) as client:
-                    response = client.post(url, json=payload, headers=headers)
-                    
-                    # 检查响应状态码
-                    if response.status_code == 200:
-                        data = response.json()
-                        return {
-                            "answer": data["choices"][0]["message"]["content"],
-                            "token_usage": {
-                                "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
-                                "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
-                                "total_tokens": data.get("usage", {}).get("total_tokens", 0)
-                            }
-                        }
-                    
-                    # 429 错误 - 速率限制，需要重试
-                    elif response.status_code == 429:
-                        retry_after = int(response.headers.get("Retry-After", 2 ** attempt))
-                        wait_time = min(retry_after, 30)  # 最多等待30秒
-                        logger.warning(f"API速率限制(429)，{wait_time}秒后重试... (第{attempt + 1}次)")
-                        
-                        if attempt < max_retries - 1:
-                            time.sleep(wait_time)
-                            continue
-                        else:
-                            raise ValueError(
-                                f"API请求频率超限，请稍后重试。"
-                                f"如持续出现，请检查API Key配额或联系服务提供商。"
-                            )
-                    
-                    # 401/403 错误 - 认证失败
-                    elif response.status_code in [401, 403]:
-                        raise ValueError(
-                            f"API认证失败({response.status_code})，请检查API Key是否正确或已过期"
-                        )
-                    
-                    # 400 错误 - 请求参数错误
-                    elif response.status_code == 400:
-                        error_detail = response.text[:200]
-                        raise ValueError(f"API请求参数错误: {error_detail}")
-                    
-                    # 5xx 错误 - 服务器错误，可重试
-                    elif response.status_code >= 500:
-                        logger.warning(f"API服务器错误({response.status_code})，重试中... (第{attempt + 1}次)")
-                        if attempt < max_retries - 1:
-                            time.sleep(2 ** attempt)  # 指数退避
-                            continue
-                        else:
-                            raise ValueError(f"API服务器错误({response.status_code})，请稍后重试")
-                    
-                    # 其他错误
-                    else:
-                        response.raise_for_status()
-                        
-            except httpx.TimeoutException:
-                logger.warning(f"API请求超时，重试中... (第{attempt + 1}次)")
-                last_error = "请求超时，请稍后重试"
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-            except httpx.ConnectError:
-                logger.warning(f"API连接失败，重试中... (第{attempt + 1}次)")
-                last_error = "无法连接到API服务器，请检查网络或base_url配置"
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-            except ValueError:
-                # 重新抛出自定义的ValueError
-                raise
-            except Exception as e:
-                last_error = str(e)
-                logger.error(f"API调用异常: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-        
-        # 所有重试都失败
-        raise ValueError(f"API调用失败: {last_error}")
-    
-    def _call_azure_openai(
-        self,
-        base_url: str,
-        api_key: str,
-        model: str,
-        api_version: str,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        max_tokens: int
-    ) -> Dict[str, Any]:
-        """调用Azure OpenAI API"""
-        url = f"{base_url.rstrip('/')}/openai/deployments/{model}/chat/completions?api-version={api_version}"
-        headers = {
-            "api-key": api_key,
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-        
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        response = await provider.chat(request)
         
         return {
-            "answer": data["choices"][0]["message"]["content"],
+            "answer": response.content,
             "token_usage": {
-                "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
-                "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
-                "total_tokens": data.get("usage", {}).get("total_tokens", 0)
-            }
-        }
-    
-    def _call_anthropic(
-        self,
-        api_key: str,
-        model: str,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        max_tokens: int
-    ) -> Dict[str, Any]:
-        """调用Anthropic Claude API"""
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json"
-        }
-        
-        # 提取system prompt
-        system_prompt = ""
-        filtered_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                system_prompt = msg["content"]
-            else:
-                filtered_messages.append(msg)
-        
-        payload = {
-            "model": model,
-            "messages": filtered_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-        if system_prompt:
-            payload["system"] = system_prompt
-        
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-        
-        return {
-            "answer": data["content"][0]["text"],
-            "token_usage": {
-                "prompt_tokens": data.get("usage", {}).get("input_tokens", 0),
-                "completion_tokens": data.get("usage", {}).get("output_tokens", 0),
-                "total_tokens": data.get("usage", {}).get("input_tokens", 0) + data.get("usage", {}).get("output_tokens", 0)
+                "prompt_tokens": response.prompt_tokens,
+                "completion_tokens": response.completion_tokens,
+                "total_tokens": response.total_tokens
             }
         }
 
-    def _call_openai_compatible_stream(
+    async def generate_answer(
         self,
-        base_url: str,
-        api_key: str,
-        model: str,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        max_tokens: int
-    ) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
-        """
-        流式调用OpenAI兼容的API
-
-        Yields:
-            Dict: 包含 content 和 reasoning_content（如有）的数据块
-
-        Returns:
-            Dict: 最终的 token_usage 统计
-        """
-        import json
-
-        url = f"{base_url.rstrip('/')}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True
-        }
-
-        reasoning_content = ""
-        answer_content = ""
-        token_usage = {}
-
-        with httpx.Client(timeout=120.0) as client:
-            with client.stream("POST", url, json=payload, headers=headers) as response:
-                if response.status_code != 200:
-                    error_text = response.text[:500]
-                    raise ValueError(f"API请求失败({response.status_code}): {error_text}")
-
-                for line in response.iter_lines():
-                    if line:
-                        line = line.decode('utf-8')
-                        if line.startswith('data: '):
-                            data_str = line[6:]
-                            if data_str == '[DONE]':
-                                break
-                            try:
-                                data = json.loads(data_str)
-                                chunk = data.get("choices", [{}])[0].get("delta", {})
-
-                                # 获取内容增量
-                                content_delta = chunk.get("content", "")
-                                if content_delta:
-                                    answer_content += content_delta
-                                    yield {
-                                        "content": content_delta,
-                                        "reasoning_content": None,
-                                        "is_finished": False
-                                    }
-
-                                # 获取思考过程（部分模型支持）
-                                if "reasoning_content" in chunk:
-                                    reasoning_delta = chunk.get("reasoning_content", "")
-                                    reasoning_content += reasoning_delta
-                                    yield {
-                                        "content": None,
-                                        "reasoning_content": reasoning_delta,
-                                        "is_finished": False
-                                    }
-
-                                # 检查是否完成
-                                finish_reason = chunk.get("finish_reason")
-                                if finish_reason:
-                                    # 获取完整的 token 使用统计
-                                    usage = data.get("usage", {})
-                                    token_usage = {
-                                        "prompt_tokens": usage.get("prompt_tokens", 0),
-                                        "completion_tokens": usage.get("completion_tokens", 0),
-                                        "total_tokens": usage.get("total_tokens", 0)
-                                    }
-                            except json.JSONDecodeError:
-                                continue
-
-        # 发送完成信号和最终统计
-        yield {
-            "content": None,
-            "reasoning_content": None,
-            "is_finished": True,
-            "token_usage": token_usage,
-            "full_answer": answer_content,
-            "full_reasoning_content": reasoning_content
-        }
-
-    def generate_answer_stream(
-        self,
-        db: Session,
-        robot: Robot,
-        question: str,
-        contexts: List[RetrievedContext],
-        session_id: str = None,
-        history_messages: List[Dict[str, str]] = None
-    ) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
-        """
-        流式生成回答
-
-        Yields:
-            Dict: 流式数据块，包含 content、reasoning_content 等
-
-        Returns:
-            Dict: 包含完整回答和 token_usage 的字典
-        """
-        # 构建检索上下文文本
-        context_text = "\n\n".join([
-            f"[文档{i+1}] {ctx.filename}\n{ctx.content}"
-            for i, ctx in enumerate(contexts)
-        ]) if contexts else "未找到相关的知识库内容"
-
-        # 构建完整的消息列表
-        messages = []
-
-        # 系统提示词
-        system_prompt = robot.system_prompt or "你是一个智能助手，请基于提供的知识库内容回答用户问题。"
-        messages.append({
-            "role": "system",
-            "content": system_prompt
-        })
-
-        # 历史对话
-        if history_messages:
-            messages.extend(history_messages)
-
-        # 当前问题
-        user_content = f"""## 知识库上下文：
-{context_text}
-
-## 用户问题：
-{question}
-
-请基于以上知识库内容回答用户问题。如果知识库中没有相关信息，请说明这一点。"""
-        messages.append({
-            "role": "user",
-            "content": user_content
-        })
-
-        # 调用LLM流式生成
-        try:
-            return self._call_openai_compatible_stream(
-                base_url=robot.llm.base_url or "https://api.openai.com/v1" if robot.llm else "https://api.openai.com/v1",
-                api_key=robot.llm.api_key if robot.llm else "",
-                model=robot.llm.model_name if robot.llm else "",
-                messages=messages,
-                temperature=getattr(robot, 'temperature', 0.7),
-                max_tokens=getattr(robot, 'max_tokens', 2000)
-            )
-        except Exception as e:
-            logger.error(f"LLM流式调用失败: {e}")
-            yield {
-                "content": f"抱歉，生成回答时出错: {str(e)}",
-                "reasoning_content": None,
-                "is_finished": True,
-                "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                "full_answer": f"抱歉，生成回答时出错: {str(e)}",
-                "full_reasoning_content": ""
-            }
-
-    def generate_answer(
-        self,
-        db: Session,
+        db: AsyncSession,
         robot: Robot,
         question: str,
         contexts: List[RetrievedContext],
         session_id: str = None,
         history_messages: List[Dict[str, str]] = None
     ) -> ChatResponse:
-        """
-        生成回答
-        
-        Args:
-            db: 数据库会话
-            robot: 机器人对象
-            question: 用户问题
-            contexts: 检索到的上下文
-            session_id: 会话ID
-            history_messages: 历史消息列表（可选，用于多轮对话）
-            
-        Returns:
-            ChatResponse: 对话响应
-        """
+        """生成回答 (Async)"""
         start_time = time.time()
-
-        # 构建检索上下文文本
+        
         context_text = "\n\n".join([
             f"[文档{i+1}] {ctx.filename}\n{ctx.content}"
             for i, ctx in enumerate(contexts)
         ]) if contexts else "未找到相关的知识库内容"
 
-        # 构建完整的消息列表（支持多轮对话）
         messages = []
-        
-        # 1. 系统提示词
-        system_prompt = robot.system_prompt or "你是一个智能助手，请基于提供的知识库内容回答用户问题。"
-        messages.append({
-            "role": "system",
-            "content": system_prompt
-        })
-        
-        # 2. 历史对话（如果有）
+        messages.append({"role": "system", "content": robot.system_prompt or "You are a helpful assistant."})
         if history_messages:
             messages.extend(history_messages)
         
-        # 3. 当前问题（包含检索上下文）
         user_content = f"""## 知识库上下文：
 {context_text}
 
 ## 用户问题：
 {question}
 
-请基于以上知识库内容回答用户问题。如果知识库中没有相关信息，请说明这一点。"""
-        messages.append({
-            "role": "user",
-            "content": user_content
-        })
+请基于以上知识库内容回答用户问题。"""
+        messages.append({"role": "user", "content": user_content})
 
-        # 调用LLM生成回答
         try:
-            llm_result = self._call_llm_api(
+            llm_result = await self._call_llm_api(
                 db=db,
                 llm_id=robot.chat_llm_id,
                 messages=messages,
-                temperature=getattr(robot, 'temperature', 0.7),
-                max_tokens=getattr(robot, 'max_tokens', 2000)
+                temperature=robot.temperature,
+                max_tokens=robot.max_tokens
             )
             answer = llm_result["answer"]
             token_usage = llm_result["token_usage"]
         except Exception as e:
             logger.error(f"LLM调用失败: {e}")
             answer = f"抱歉，生成回答时出错: {str(e)}"
-            token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            token_usage = {}
 
         response_time = time.time() - start_time
-
-        # 使用传入的session_id或生成新的
         if not session_id:
             session_id = str(uuid.uuid4())
 
@@ -722,102 +463,50 @@ class RAGService:
             token_usage=token_usage,
             response_time=response_time
         )
-    
-    def chat_with_context(
+
+    async def chat_with_context(
         self,
-        db: Session,
+        db: AsyncSession,
         robot: Robot,
         knowledge_ids: List[int],
-        session_id: str,
         question: str,
-        user_id: int
+        session_id: str = None,
+        user_id: int = None
     ) -> ChatResponse:
-        """
-        带上下文的对话（支持多轮对话）
-        
-        Args:
-            db: 数据库会话
-            robot: 机器人对象
-            knowledge_ids: 知识库ID列表
-            session_id: 会话ID
-            question: 用户问题
-            user_id: 用户ID
-            
-        Returns:
-            ChatResponse: 对话响应
-        """
-        retrieval_start = time.time()
-        
-        # 1. 获取或初始化上下文
-        context_manager.get_or_load_context(
-            db=db,
-            session_id=session_id,
-            user_id=user_id,
-            robot_id=robot.id,
-            system_prompt=robot.system_prompt or ""
-        )
-        
-        # 2. 基于上下文重写查询（可选，用于提升检索效果）
-        # rewritten_query = context_manager.rewrite_query_with_context(session_id, question)
-        rewritten_query = question  # 简化处理，直接使用原始查询
-        
-        # 3. 执行混合检索
-        contexts = self.hybrid_retrieve(
+        """带上下文的对话 (Async)"""
+        # 1. 检索
+        contexts = await self.hybrid_retrieve(
             db=db,
             robot=robot,
             knowledge_ids=knowledge_ids,
-            query=rewritten_query,
+            query=question,
             top_k=robot.top_k
         )
         
-        retrieval_time = time.time() - retrieval_start
-        
-        # 4. 获取历史消息用于构建Prompt
-        from app.utils.redis_client import redis_client
-        history_messages = redis_client.get_context_messages(session_id)
-        
-        # 转换为LLM消息格式
-        llm_history = [
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in history_messages
-        ]
-        
-        generation_start = time.time()
-        
-        # 5. 生成回答
-        response = self.generate_answer(
+        # 2. 获取历史消息
+        history_messages = []
+        if session_id:
+            try:
+                history_messages = await redis_client.get_context_messages(session_id)
+            except Exception:
+                history_messages = []
+
+        # 3. 生成回答
+        response = await self.generate_answer(
             db=db,
             robot=robot,
             question=question,
             contexts=contexts,
             session_id=session_id,
-            history_messages=llm_history
+            history_messages=[{"role": m["role"], "content": m["content"]} for m in history_messages]
         )
         
-        generation_time = time.time() - generation_start
-        
-        # 6. 更新Redis上下文（添加当前轮对话）
-        context_manager.add_user_message(
-            session_id=session_id,
-            content=question,
-            tokens=response.token_usage.get("prompt_tokens", 0)
-        )
-        context_manager.add_assistant_message(
-            session_id=session_id,
-            content=response.answer,
-            tokens=response.token_usage.get("completion_tokens", 0)
-        )
-        
-        # 更新活跃会话时间
-        redis_client.update_active_session(user_id, session_id)
-        
-        logger.info(
-            f"对话完成: session={session_id}, "
-            f"retrieval={retrieval_time:.2f}s, generation={generation_time:.2f}s"
-        )
-        
+        # 4. 更新Redis上下文 (Async)
+        if session_id:
+            await context_manager.add_user_message(session_id, question)
+            await context_manager.add_assistant_message(session_id, response.answer)
+            await redis_client.update_active_session(user_id, session_id)
+            
         return response
 
-
-# 全局RAG服务实例
 rag_service = RAGService()

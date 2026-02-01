@@ -13,8 +13,8 @@ from app.models.knowledge import Knowledge
 from app.utils.file_parser import file_parser
 from app.utils.text_splitter import TextSplitter
 from app.utils.embedding import get_embedding_model
-from app.utils.es_client import ESClient
-from app.utils.milvus_client import MilvusClient
+from app.utils.es_client import es_client
+from app.utils.milvus_client import milvus_client
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -41,8 +41,8 @@ def process_document_task(self, document_id: int):
         # 获取文档记录
         document = db.query(Document).filter(Document.id == document_id).first()
         if not document:
-            logger.error(f"文档不存在: {document_id}")
-            return {"status": "error", "message": "文档不存在"}
+            logger.warning(f"文档 {document_id} 不存在，可能已被删除")
+            return {"status": "skipped", "message": "文档不存在"}
         
         # 获取知识库配置
         knowledge = db.query(Knowledge).filter(Knowledge.id == document.knowledge_id).first()
@@ -87,8 +87,6 @@ def process_document_task(self, document_id: int):
         
         # 4. 存储到Milvus和Elasticsearch
         logger.info(f"开始存储向量和索引")
-        milvus_client = MilvusClient()
-        es_client = ESClient()
         
         # 准备数据
         chunk_data = []
@@ -116,6 +114,14 @@ def process_document_task(self, document_id: int):
         logger.info(f"ES索引完成: {len(chunk_data)} 条")
         
         # 5. 更新文档状态
+        # 再次检查文档是否存在
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            logger.warning(f"文档 {document_id} 在处理完成前已被删除，清理资源")
+            milvus_client.delete_by_document(knowledge.vector_collection_name, document_id)
+            es_client.delete_by_document(document_id)
+            return {"status": "skipped", "message": "文档已被删除"}
+
         document.status = "completed"
         document.chunk_count = len(chunks)
         document.error_msg = None  # 成功时清空错误信息
