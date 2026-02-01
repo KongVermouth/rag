@@ -1,454 +1,192 @@
-# RAG 知识问答系统
+# 企业级 RAG 知识问答系统
 
-基于检索增强生成（Retrieval-Augmented Generation）技术的智能知识问答系统，支持文档管理、向量化存储、智能问答等功能。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Next.js: 14](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
 
-## 目录
-
-- [项目简介](#项目简介)
-- [技术栈](#技术栈)
-- [系统架构](#系统架构)
-- [安装部署](#安装部署)
-- [项目结构](#项目结构)
-- [API文档](#api文档)
+这是一个基于检索增强生成（Retrieval-Augmented Generation, RAG）技术的全栈智能知识问答系统。系统支持多格式文档上传、自动化解析、语义切片、向量化存储及混合搜索，旨在为企业提供高效、精准的本地知识问答能力。
 
 ---
 
-## 项目简介
+## 🚀 项目特性
 
-本系统是一个企业级 RAG 知识问答平台，主要功能包括：
-
-- **用户认证**: 用户注册、登录、JWT Token 认证
-- **知识库管理**: 文档上传、解析、切片、向量化存储
-- **机器人管理**: 创建和管理 AI 问答机器人
-- **智能问答**: 基于向量检索的上下文感知问答
-- **会话管理**: 多轮对话上下文管理
-
----
-
-## 技术栈
-
-### 后端技术
-
-| 技术 | 用途 |
-|------|------|
-| **FastAPI** | Web 框架 |
-| **SQLAlchemy** | ORM 数据库访问 |
-| **MySQL 8.0** | 关系型数据库 |
-| **Redis** | 缓存、会话存储 |
-| **Milvus** | 向量数据库 |
-| **Elasticsearch** | 全文检索 |
-| **Celery** | 异步任务队列 |
-| **JWT** | 认证授权 |
-
-### 前端技术
-
-| 技术 | 用途 |
-|------|------|
-| **Next.js 14** | React 框架 |
-| **React 18** | UI 库 |
-| **Zustand** | 状态管理 |
-| **Tailwind CSS** | 样式框架 |
-| **Axios** | HTTP 客户端 |
-| **Recharts** | 图表组件 |
-
-### 基础设施
-
-| 技术 | 用途 |
-|------|------|
-| **Docker** | 容器化部署 |
-| **MinIO** | 对象存储 |
-| **Attu** | Milvus Web 管理 |
+- **全异步后端**: 基于 FastAPI 实现的高性能异步 API，确保高并发处理能力。
+- **现代化前端**: 采用 Next.js 14 (App Router) 构建，响应式设计，极致的用户体验。
+- **去 LangChain 化**: 核心逻辑自研实现，降低复杂度，提升系统可控性与性能。
+- **混合检索策略**: 结合 Milvus 向量检索与 Elasticsearch 全文检索（IK 分词），大幅提升召回精度。
+- **文档全生命周期管理**: 支持 PDF、Word、TXT、Markdown、HTML 等多种格式的自动化处理。
+- **微服务 Worker 架构**: 文档解析、切片、向量化均通过 Kafka 消息队列异步解耦处理。
+- **SiliconFlow 深度集成**: 针对大模型 Embedding 接口提供自动分批、指数退火重试及详细错误诊断。
 
 ---
 
-## 系统架构与流程
+## 🛠️ 技术栈
 
-### 1. 核心架构图 (High-Level)
+### 后端 (Backend)
+- **框架**: FastAPI
+- **异步驱动**: SQLAlchemy (Async), aiomysql, aiokafka, redis-py, elasticsearch-py
+- **向量检索**: Milvus 2.4.x
+- **全文检索**: Elasticsearch 7.17.x (含 IK 分词器)
+- **消息队列**: Apache Kafka 3.6.x
+- **Embedding 模型**: 本地部署 Qwen3-Embedding-0.6B
+- **日志管理**: Loguru
 
-```mermaid
-graph TD
-    User[用户浏览器] <--> Front[前端 Next.js 14]
-    Front <--> API[FastAPI 后端]
-    
-    subgraph Storage
-        API <--> MySQL[(MySQL 8.0\n元数据)]
-        API <--> Redis[(Redis\n缓存/会话)]
-        API <--> Milvus[(Milvus\n向量库)]
-        API <--> ES[(ElasticSearch\n全文检索)]
-    end
-    
-    subgraph AsyncTasks
-        API --> Kafka{Kafka}
-        Kafka --> Parser[文档解析服务]
-        Parser --> Kafka
-        Kafka --> Splitter[切片服务]
-        Splitter --> Kafka
-        Kafka --> Vectorizer[向量化服务]
-        Vectorizer --> Milvus
-        Vectorizer --> ES
-    end
-```
+### 前端 (Frontend)
+- **框架**: Next.js 14 (App Router)
+- **状态管理**: Zustand
+- **样式**: Tailwind CSS
+- **HTTP 客户端**: Axios
+- **可视化**: Recharts
 
-### 2. 数据库实体关系 (ERD)
+### 基础设施 (Infrastructure)
+- **容器化**: Docker & Docker Compose
+- **存储**: MySQL 8.0, Redis 7.2, MinIO
 
-系统采用 MySQL 存储结构化元数据，以下为核心表关系图：
+---
 
-```mermaid
-erDiagram
-    rag_user ||--o{ rag_knowledge : "创建"
-    rag_user ||--o{ rag_robot : "创建"
-    rag_llm ||--o{ rag_knowledge : "使用"
-    rag_knowledge ||--o{ rag_document : "包含"
-    rag_robot ||--o{ rag_session : "对话"
-    rag_session ||--o{ rag_chat_history : "记录"
+## 📂 目录结构
 
-    rag_user {
-        int id PK
-        string username
-        string email
-    }
-    rag_llm {
-        int id PK
-        string name
-        string provider
-    }
-    rag_document {
-        int id PK
-        string file_name
-        string status
-    }
-```
-
-### 3. 登录与认证时序 (Sequence)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as 用户
-    participant F as 前端
-    participant B as 后端
-    participant D as MySQL
-    
-    U->>F: 输入账号密码
-    F->>B: POST /api/v1/auth/login
-    B->>D: 验证用户并获取 Hash
-    D-->>B: 用户信息
-    B->>B: 密码校验 & 生成 JWT
-    B-->>F: 返回 Token
-    F->>F: 存储 Token (Local Storage)
-    F-->>U: 登录成功
+```text
+rag/
+├── backend/                # 后端服务
+│   ├── app/                # 核心逻辑
+│   ├── config/             # 模型与业务配置
+│   ├── data/               # 本地存储 (原始文件、清洗结果)
+│   ├── models/             # 本地 Embedding 模型权重
+│   ├── scripts/            # 数据库维护与 ES 插件脚本
+│   ├── sql/                # 数据库初始化脚本
+│   ├── tests/              # 单元测试与压力测试
+│   └── main.py             # 入口文件
+├── front/                  # 前端应用
+│   ├── src/                # 源代码
+│   └── cypress/            # E2E 测试
+├── docker-compose.yaml      # 基础架构容器配置
+└── README.md                # 项目总文档
 ```
 
 ---
 
-## 快速验证
+## 🏁 快速开始
 
-提供一条可复制执行的 curl 命令，用于确认后端登录接口的连通性：
+### 1. 环境准备
+确保已安装以下工具：
+- [Docker](https://www.docker.com/) & [Docker Compose](https://docs.docker.com/compose/)
+- [Python 3.10+](https://www.python.org/downloads/)
+- [Node.js 18+](https://nodejs.org/)
 
+### 2. 启动基础架构
+在根目录下启动所有中间件容器：
 ```bash
-curl -X 'POST' 'http://localhost:8000/api/v1/auth/login' \
-  -H 'Content-Type: application/json' \
-  -d '{"username": "admin@example.com", "password": "Admin@123"}'
-```
-
-预期响应：`200 OK` 并返回 `access_token`。
-
----
-
-## 安装部署
-
-### 前置条件
-
-| 工具 | 版本要求 |
-|------|----------|
-| Python | 3.10+ |
-| Docker | 20.10+ |
-| Docker Compose | 2.0+ |
-| Git | 2.0+ |
-
-### 步骤 1：创建 Python 虚拟环境
-
-```bash
-# 进入后端目录
-cd backend
-
-# 创建虚拟环境 (使用 venv)
-python -m venv .venv
-
-# 有miniconda或者conda   使用conda即可
-conda create -n rag python==3.10
-conda activate rag
-
-# 激活虚拟环境
-# Windows
-.venv\Scripts\activate
-
-# Linux/Mac
-source .venv/bin/activate
-```
-
-### 步骤 2：安装 Python 依赖包
-
-```bash
-# 使用 pip 安装
-pip install -r requirements.txt
-
-# 或使用 uv (推荐，速度更快)
-uv pip install -r requirements.txt
-```
-
-**注意**: 如需 GPU 加速支持，请额外安装 PyTorch CUDA 版本：
-
-```bash
-pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
-    --index-url https://download.pytorch.org/whl/cu124
-```
-
-### 步骤 3：下载 Embedding 模型
-
-```bash
-# 使用提供的脚本下载模型
-cd backend/src
-
-# 默认下载 Qwen3-Embedding-0.6B 模型到 ../models 目录
-python download_models.py
-
-# 模型将保存在 backend/models/Qwen/Qwen3-Embedding-0___6B/
-```
-
-### 步骤 4：启动 Docker 容器
-
-```bash
-# 在 backend 目录下执行
 docker-compose up -d
-
-# 启动后检查容器状态
-docker-compose ps
 ```
-
-**启动的容器列表**:
-| 容器名 | 端口 | 服务 |
-|--------|------|------|
-| rag-mysql8 | 3306 | MySQL 8.0 |
-| rag-es7 | 9200/9300 | Elasticsearch 7.17 |
-| rag-kibana | 5601 | Kibana |
-| rag-etcd | 2379 | etcd |
-| rag-minio | 9000/9001 | MinIO |
-| rag-milvus | 19530/9091 | Milvus |
-| rag-attu | 8001 | Attu (Milvus UI) |
-| rag-redis | 6379 | Redis |
-
-### 步骤 5：执行 DDL 语句
-
+等待服务启动后，务必安装 Elasticsearch IK 分词器：
 ```bash
-# 等待 MySQL 容器完全启动后，执行建表脚本
-docker exec -i rag-mysql8 mysql -uroot -proot rag_system < sql/init_schema.sql
-```
-
-或者通过数据库管理工具（如 MySQL Workbench、Navicat）连接后执行 `sql/init_schema.sql` 文件中的 SQL 语句。
-
-### 步骤6：安装ik分词器
-
-```bash
-# 在 ES 容器中安装 IK 分词器
+# 在 ES 容器中安装插件
 docker exec -it rag-es7 elasticsearch-plugin install https://github.com/infinilabs/analysis-ik/releases/download/v7.17.10/elasticsearch-analysis-ik-7.17.10.zip
-
-# 重启 ES 容器使插件生效
+# 重启 ES
 docker restart rag-es7
 ```
 
-### 步骤 7：配置环境变量
-
+### 3. 配置后端
 ```bash
-# 复制环境变量模板
 cd backend
+# 创建并激活虚拟环境
+python -m venv .venv
+source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 下载 Embedding 模型
+python src/download_models.py
+
+# 初始化配置
 cp .env.example .env
+# 根据实际环境修改 .env 中的数据库及密钥配置
 
-# 编辑 .env 文件，修改配置
-# 关键配置项：
-# - JWT_SECRET_KEY: JWT 密钥 (至少32字符)
-# - AES_ENCRYPTION_KEY: API Key 加密密钥 (32字符)
-# - DB_PASSWORD: 数据库密码
-```
-
-### 步骤 8：启动后端服务
-
-```bash
-# 开发模式启动 (自动重载)
-cd backend
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# 或使用
+# 启动后端服务
 python main.py
+
+# 启动异步 Workers (需独立终端)
+python -m app.workers.parser
+python -m app.workers.splitter
+python -m app.workers.vectorizer
 ```
 
-后端服务启动后：
-- API 文档: http://localhost:8000/docs
-- 健康检查: http://localhost:8000/health
-
-### 步骤 9：启动前端服务
-
+### 4. 配置前端
 ```bash
-# 进入前端目录
 cd front
-
-# 安装依赖 (首次运行)
+# 安装依赖
 npm install
 
 # 启动开发服务器
 npm run dev
 ```
-
-前端服务启动后：
-- 访问地址: http://localhost:3000
+访问 `http://localhost:3000` 即可开始体验。
 
 ---
 
-## 项目结构
+## 🔑 环境变量说明
 
-```
-rag/
-├── backend/                      # 后端项目
-│   ├── app/                      # FastAPI 应用
-│   │   ├── api/v1/               # API 路由层
-│   │   │   ├── auth.py           # 认证接口
-│   │   │   ├── users.py          # 用户接口
-│   │   │   ├── documents.py      # 文档接口
-│   │   │   ├── knowledge.py      # 知识库接口
-│   │   │   ├── robots.py         # 机器人接口
-│   │   │   ├── chat.py           # 问答接口
-│   │   │   ├── llms.py           # LLM 配置接口
-│   │   │   └── apikeys.py        # API Key 接口
-│   │   ├── core/                 # 核心配置
-│   │   │   ├── config.py         # 配置类
-│   │   │   ├── security.py       # 安全工具 (JWT, 加密)
-│   │   │   └── deps.py           # 依赖注入
-│   │   ├── db/                   # 数据库层
-│   │   │   ├── session.py        # 数据库会话
-│   │   │   └── base.py           # 基类
-│   │   ├── models/               # 数据模型
-│   │   │   ├── user.py           # 用户模型
-│   │   │   ├── document.py       # 文档模型
-│   │   │   ├── knowledge.py      # 知识库模型
-│   │   │   ├── robot.py          # 机器人模型
-│   │   │   ├── session.py        # 会话模型
-│   │   │   └── chat_history.py   # 聊天记录模型
-│   │   ├── schemas/              # Pydantic 模式
-│   │   ├── services/             # 业务逻辑层
-│   │   │   ├── auth_service.py   # 认证服务
-│   │   │   ├── rag_service.py    # RAG 问答服务
-│   │   │   └── ...
-│   │   ├── tasks/                # Celery 异步任务
-│   │   ├── utils/                # 工具类
-│   │   │   ├── embedding.py      # 向量化工具
-│   │   │   ├── file_parser.py    # 文件解析
-│   │   │   ├── text_splitter.py  # 文本切分
-│   │   │   ├── milvus_client.py  # Milvus 客户端
-│   │   │   └── es_client.py      # ES 客户端
-│   │   └── main.py               # 应用入口
-│   ├── data/                     # 数据目录
-│   │   ├── raw_data/             # 原始文件
-│   │   ├── cleaned_md/           # 清洗后的 Markdown
-│   │   └── cleaned_txt/          # 清洗后的 Text
-│   ├── models/                   # 本地模型存储
-│   │   └── Qwen/                 # Qwen 模型
-│   ├── sql/                      # SQL 脚本
-│   │   └── init_schema.sql       # 数据库初始化
-│   ├── src/                      # 工具脚本
-│   │   ├── download_models.py    # 模型下载脚本
-│   │   └── embedding_demo.py     # 向量化示例
-│   ├── docker-compose.yaml       # Docker Compose 配置
-│   ├── requirements.txt          # Python 依赖
-│   ├── .env.example              # 环境变量模板
-│   └── README.md                 # 后端文档
-│
-├── front/                        # 前端项目 (Next.js)
-│   ├── src/                      # 源代码
-│   │   ├── app/                  # Next.js App Router
-│   │   ├── components/           # React 组件
-│   │   ├── store/                # Zustand 状态管理
-│   │   ├── services/             # API 服务
-│   │   └── utils/                # 工具函数
-│   ├── public/                   # 静态资源
-│   ├── package.json              # npm 依赖
-│   ├── tailwind.config.ts        # Tailwind 配置
-│   └── Dockerfile
-│
-└── README.md                     # 项目主文档
-```
+| 变量名 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| `DB_PASSWORD` | MySQL 密码 | `rag_jin` |
+| `JWT_SECRET_KEY` | JWT 签发密钥 | 请务必修改 |
+| `AES_ENCRYPTION_KEY` | API Key 加密密钥 (32位) | 请务必修改 |
+| `ES_HOST` | Elasticsearch 地址 | `http://localhost:9200` |
+| `KAFKA_BOOTSTRAP_SERVERS` | Kafka 地址 | `localhost:9094` |
+| `NEXT_PUBLIC_API_URL` | 前端调用的后端地址 | `http://localhost:8000` |
 
 ---
 
-## API 文档
+## 📖 API 接口文档
 
-### 认证接口
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/v1/auth/register` | 用户注册 |
-| POST | `/api/v1/auth/login` | 用户登录 |
-| GET | `/api/v1/auth/me` | 获取当前用户 |
-| POST | `/api/v1/auth/refresh` | 刷新 Token |
-
-### 核心接口
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/v1/chat/{robot_id}` | 机器人问答 |
-| POST | `/api/v1/documents/upload` | 上传文档 |
-| POST | `/api/v1/knowledge/{id}/index` | 索引知识库 |
-| GET | `/api/v1/robots` | 获取机器人列表 |
-
-详细 API 文档请访问: http://localhost:8000/docs
+后端服务启动后，可通过以下地址查看详细的 Swagger UI 文档：
+- **API 文档**: `http://localhost:8000/docs`
+- **健康检查**: `http://localhost:8000/health`
 
 ---
 
-## 默认账号
+## 🧪 测试与质量
 
-首次启动时，系统会自动创建默认管理员账号：
-
-| 字段 | 值 |
-|------|------|
-| 邮箱 | admin@example.com |
-| 密码 | Admin@123 |
-
-**注意**: 首次登录后请及时修改默认密码。
-
----
-
-## 常见问题
-
-### 1. Docker 容器启动失败
-
+### 后端
 ```bash
-# 检查容器日志
-docker-compose logs
-
-# 查看具体错误
-docker-compose logs mysql8
+cd backend
+# 运行单元测试
+pytest tests/
+# 运行压力测试
+python tests/stress_test_upload.py
+# 代码检查
+ruff check .
 ```
 
-### 2. 模型下载失败
-
+### 前端
 ```bash
-# 设置 ModelScope Token (可选)
-export MODELSCOPE_SDK_TOKEN="your_token"
-
-# 重新下载
-python src/download_models.py
-```
-
-### 3. Milvus 连接失败
-
-确保 MinIO 和 etcd 容器正常运行后再启动 Milvus：
-
-```bash
-# 按依赖顺序启动
-docker-compose up -d etcd minio milvus-standalone
+cd front
+# 运行 Lint
+npm run lint
+# 运行 E2E 测试
+npm run cypress:open
 ```
 
 ---
 
-## License
+## 🤝 贡献指南
 
-MIT License
+1. Fork 本项目。
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)。
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)。
+4. 推送到分支 (`git push origin feature/AmazingFeature`)。
+5. 提交 Pull Request。
+
+---
+
+## 📄 许可证
+
+本项目基于 [MIT 许可证](LICENSE) 开源。
+
+---
+
+## 📝 更新日志
+
+详见 [backend/CHANGELOG.md](backend/CHANGELOG.md)。
